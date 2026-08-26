@@ -1,0 +1,10 @@
+/gopangoblin
+/gopangoblin.exe
+/dist/
+
+secret.txt
+*.env
+
+*.iml
+.idea/
+.vscode/
