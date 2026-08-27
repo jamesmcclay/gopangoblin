@@ -1,5 +1,5 @@
 // Command gopangoblin runs tools related to Palo Alto Networks technologies.
-// Built as "pang" by convention (see README.md / setup.ps), but usage and
+// Built as "pang" by convention (see README.md / setup.ps1), but usage and
 // error output always reflect whatever the binary is actually named.
 package main
 
@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	_ "github.com/jamesmcclay/gopangoblin/internal/habuilder"
+	_ "github.com/jamesmcclay/gopangoblin/internal/reset"
 	"github.com/jamesmcclay/gopangoblin/internal/tool"
 	_ "github.com/jamesmcclay/gopangoblin/internal/update"
 )

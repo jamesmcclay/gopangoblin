@@ -1,7 +1,11 @@
-// Package habuilder implements the "habuilder" gopangoblin tool: it builds
-// (or tears down) Strata Cloud Manager HA configurations for the firewall
-// pairs listed in a ha_pairs.yml playbook.
-package habuilder
+// Package reset implements the "reset" gopangoblin tool: it wipes every
+// device-owned (not folder/snippet-shared) SCM configuration object for
+// the devices listed in a reset.yml playbook -- interfaces, zones,
+// routing, security/NAT rules, objects, and HA config -- leaving the
+// device's SCM registration intact. It does not touch the management
+// interface or DNS settings; SCM doesn't support managing those centrally
+// for on-prem/self-registered devices like these (see reconcile.go).
+package reset
 
 import (
 	"flag"
@@ -22,18 +26,18 @@ func init() {
 	tool.Register(&Tool{})
 }
 
-// Tool is the "habuilder" gopangoblin tool.
+// Tool is the "reset" gopangoblin tool.
 type Tool struct{}
 
-func (t *Tool) Name() string { return "habuilder" }
+func (t *Tool) Name() string { return "reset" }
 
 func (t *Tool) Summary() string {
-	return "Build or remove Strata Cloud Manager HA configs from a playbook"
+	return "Wipe SCM-managed firewall config back to just its HA/network/security/objects baseline"
 }
 
 func (t *Tool) Run(args []string) error {
-	fs := flag.NewFlagSet("habuilder", flag.ExitOnError)
-	playbookPath := fs.String("playbook", "playbooks/ha_pairs.yml", "path to the ha_pairs.yml playbook")
+	fs := flag.NewFlagSet("reset", flag.ExitOnError)
+	playbookPath := fs.String("playbook", "playbooks/reset.yml", "path to the reset.yml playbook")
 	clientID := fs.String("client-id", os.Getenv("SCM_CLIENT_ID"), "SCM service account client ID (env SCM_CLIENT_ID)")
 	clientSecret := fs.String("client-secret", os.Getenv("SCM_CLIENT_SECRET"), "SCM service account client secret (env SCM_CLIENT_SECRET)")
 	tsgID := fs.String("tsg-id", os.Getenv("SCM_TSG_ID"), "SCM Tenant Service Group ID (env SCM_TSG_ID)")
@@ -52,7 +56,7 @@ func (t *Tool) Run(args []string) error {
 		return err
 	}
 
-	pairs, err := pb.Resolved()
+	fws, err := pb.Resolved()
 	if err != nil {
 		return err
 	}
@@ -70,29 +74,34 @@ func (t *Tool) Run(args []string) error {
 
 	r := &reconciler{
 		client: client,
-		mode:   pb.Mode,
 		dryRun: *dryRun,
 	}
 
-	fmt.Printf("habuilder: playbook %q, mode %s, %d HA pair(s)\n", pb.Name, pb.Mode, len(pairs))
+	fmt.Printf("reset: playbook %q, %d device(s)\n", pb.Name, len(fws))
 
 	var failures int
-	for _, pair := range pairs {
-		if err := r.reconcilePair(pair, devices); err != nil {
-			fmt.Fprintf(os.Stderr, "habuilder: %s: %v\n", pair.Name, err)
+	for _, fw := range fws {
+		device, err := scm.ResolveDeviceBySerial(devices, fw.Serial)
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "reset: %s: %v\n", fw.Name, err)
+			failures++
+			continue
+		}
+		if err := r.reconcileDevice(device, fw); err != nil {
+			fmt.Fprintf(os.Stderr, "reset: %s: %v\n", fw.Name, err)
 			failures++
 		}
 	}
 
 	if pb.Push && !*noPush && !*dryRun && len(r.touched) > 0 {
 		if err := pushChanges(client, pb, r.touched); err != nil {
-			fmt.Fprintf(os.Stderr, "habuilder: push: %v\n", err)
+			fmt.Fprintf(os.Stderr, "reset: push: %v\n", err)
 			failures++
 		}
 	}
 
 	if failures > 0 {
-		return fmt.Errorf("%d HA pair(s) failed, see above", failures)
+		return fmt.Errorf("%d device(s) failed, see above", failures)
 	}
 	return nil
 }
@@ -100,9 +109,9 @@ func (t *Tool) Run(args []string) error {
 // pushChanges triggers an SCM candidate-config push for the given device
 // serials and waits for the resulting job to finish.
 func pushChanges(client *scm.Client, pb *Playbook, serials []string) error {
-	description := fmt.Sprintf("gopangoblin habuilder: %s (%s)", pb.Name, pb.Mode)
+	description := fmt.Sprintf("gopangoblin reset: %s", pb.Name)
 
-	fmt.Printf("habuilder: pushing config to %d device(s): %v\n", len(serials), serials)
+	fmt.Printf("reset: pushing config to %d device(s): %v\n", len(serials), serials)
 	result, err := client.PushCandidateConfig(serials, description)
 	if err != nil {
 		return fmt.Errorf("triggering push: %w", err)
@@ -111,7 +120,7 @@ func pushChanges(client *scm.Client, pb *Playbook, serials []string) error {
 		return fmt.Errorf("push not accepted: %s", result.Message)
 	}
 
-	fmt.Printf("habuilder: push job %s enqueued, waiting for completion...\n", result.JobID)
+	fmt.Printf("reset: push job %s enqueued, waiting for completion...\n", result.JobID)
 	job, err := client.WaitForJob(result.JobID, pushJobTimeout, pushJobPollFreq)
 	if err != nil {
 		return err
@@ -120,6 +129,6 @@ func pushChanges(client *scm.Client, pb *Playbook, serials []string) error {
 		return fmt.Errorf("push job %s finished with result %s: %s", job.ID, job.ResultStr, job.Details)
 	}
 
-	fmt.Printf("habuilder: push job %s completed successfully\n", job.ID)
+	fmt.Printf("reset: push job %s completed successfully\n", job.ID)
 	return nil
 }

@@ -1,9 +1,10 @@
 // Package scm is a minimal client for the Palo Alto Networks Strata Cloud
-// Manager (SCM) config APIs, covering just what habuilder needs: resolving
-// a device by serial number, and getting/creating/updating/deleting its
-// high availability configuration.
+// Manager (SCM) config APIs, shared by the gopangoblin tools that need it
+// (habuilder, reset): resolving a device by serial number, and managing its
+// HA configuration, management interface, DNS settings, and other
+// folder/snippet/device-scoped config resources.
 //
-// API reference: https://pan.dev/scm/api/config/ngfw/device/get-ha-configuration/
+// API reference: https://pan.dev/scm/api/
 package scm
 
 import (

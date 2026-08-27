@@ -1,6 +1,6 @@
 // Package update implements the "update" gopangoblin tool: it pulls a
 // fresh copy of the gopangoblin source from GitHub and rebuilds the binary,
-// mirroring the download-a-zip approach setup.ps uses rather than assuming
+// mirroring the download-a-zip approach setup.ps1 uses rather than assuming
 // a git checkout is present.
 package update
 

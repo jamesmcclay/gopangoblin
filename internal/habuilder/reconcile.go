@@ -3,7 +3,7 @@ package habuilder
 import (
 	"fmt"
 
-	"github.com/jamesmcclay/gopangoblin/internal/habuilder/scm"
+	"github.com/jamesmcclay/gopangoblin/internal/scm"
 )
 
 type reconciler struct {

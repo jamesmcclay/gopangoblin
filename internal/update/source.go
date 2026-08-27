@@ -19,7 +19,7 @@ var syncPaths = []string{
 	"main.go",
 	"go.mod",
 	"go.sum",
-	"setup.ps",
+	"setup.ps1",
 	"README.md",
 	".gitignore",
 	"LICENSE-APACHE",
@@ -29,7 +29,7 @@ var syncPaths = []string{
 
 // findRepoRoot walks upward from start looking for a directory containing
 // go.mod, so "update" can be run from the gopangoblin repo root (as
-// produced by setup.ps or a manual checkout).
+// produced by setup.ps1 or a manual checkout).
 func findRepoRoot(start string) (string, error) {
 	dir, err := filepath.Abs(start)
 	if err != nil {

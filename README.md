@@ -8,6 +8,9 @@ tool lives under `internal/<toolname>` and is registered with the top-level
 
 - **habuilder** — builds (or removes) Strata Cloud Manager (SCM) HA
   configurations for a list of firewall pairs defined in a YAML playbook.
+- **reset** — wipes a device's own SCM-managed configuration (interfaces,
+  zones, routing, security/NAT rules, objects, HA config) back to a vanilla
+  baseline, for a list of firewalls defined in a YAML playbook.
 - **update** — pulls the latest gopangoblin source from GitHub and rebuilds.
 
 ## Setup (Windows / PowerShell)
@@ -37,7 +40,7 @@ go build -o pang.exe .
 Write-Host "Built $root\gopangoblin-main\pang.exe"
 ```
 
-This script is also checked in at [`setup.ps`](setup.ps).
+This script is also checked in at [`setup.ps1`](setup.ps1).
 
 ### Manual / other platforms
 
@@ -144,10 +147,111 @@ pang habuilder -h
 pang help
 ```
 
+## reset
+
+`reset` wipes a device's own configuration back to a vanilla baseline:
+network interfaces, zones, logical routers, security/NAT rules, and
+objects (addresses, address-groups, services, service-groups, tags), plus
+any HA configuration habuilder created. It does **not** touch the
+device's management interface or DNS settings — see "What reset doesn't
+do" below — and it never touches the device's SCM registration itself.
+
+It uses the same SCM credentials as habuilder (flags or
+`SCM_CLIENT_ID`/`SCM_CLIENT_SECRET`/`SCM_TSG_ID`).
+
+### Playbook format (`reset.yml`)
+
+```yaml
+name: JamesTheGreat's Reset Firewalls
+push: true                  # push the wipe to the firewalls automatically
+fw_list:
+  - name: James Lab A
+    serial: 12345
+  - name: James Lab B
+    serial: 67890
+```
+
+- **push** — same semantics as habuilder: after wiping, automatically push
+  the candidate config to every device that actually had something
+  removed. Override with `-no-push` for one run.
+
+### Safety: shared folder/snippet config is never touched
+
+SCM devices can inherit configuration from a shared folder or snippet
+(e.g. every onboarded NGFW in this lab inherits a default `ethernet1/3`
+"Internet Interface" and `ethernet1/4` "Internal Interface" from a shared
+`ngfw-shared` folder template). SCM's device-filtered list API resolves
+those shared objects into a device's view and echoes that device back in
+the response as if the object belonged to it — confirmed live, including
+the same object id being returned identically for every device that
+inherits it. `reset` re-verifies every candidate object with a second,
+unfiltered lookup before deleting it, and only ever deletes objects
+confirmed to be owned directly by that one device. Anything found to
+actually be folder/snippet-shared is logged as `[shared] ... not
+removing ...` and left alone.
+
+### How the wipe works (and its limits)
+
+SCM's config API has no "declare the desired config, drop everything else"
+verb — there's no wholesale replace. It's structured like Kubernetes' or
+Terraform's provider APIs: individually typed resources (zones, rules,
+interfaces, objects, ...), each with its own list/get/create/update/delete
+endpoints, not a single document you can PUT as a whole. So `reset` wipes
+a device by enumerating a fixed list of known resource types
+(`internal/scm/wipe.go`'s `WipeResources`) and deleting whatever's found
+and confirmed device-owned.
+
+That list isn't exhaustive — PBF rules, DoS/decryption/app-override/QoS/
+SDWAN rules, sub-interfaces, external dynamic lists, and others aren't
+covered yet, so a device using one of those config types isn't guaranteed
+fully vanilla after a reset. Extend `WipeResources` as gaps are found; a
+device with an unlisted resource type just won't have that particular
+config removed, it won't cause an error.
+
+### What reset doesn't do
+
+Setting a device's management interface (IP/DHCP, gateway) or DNS
+servers, and setting its local admin user/password, are **not**
+implemented. Both were investigated and dropped:
+
+- SCM's `management-interface` and `service-settings` (DNS) config APIs
+  reject device-scoped create/update for these on-prem/self-registered
+  lab devices with `"Device <serial> doesn't exist"`, before any field
+  validation even runs — folder-scoped requests to the same endpoint go
+  through fine. This looks like a real product limitation (centrally
+  pushing a change to the very interface SCM uses to reach the box is a
+  chicken-and-egg problem), not something fixable from this client.
+- A device's local admin user/password isn't exposed by any SCM config
+  API at all — PAN-OS's `mgt-config` administrators are a different thing
+  from SCM's `/local-users` (which is the Local User Database used for
+  auth policies, not device administrators).
+
+Both would need direct PAN-OS XML API calls to each firewall's reachable
+management IP using its current admin credentials, rather than the SCM
+candidate-push model the rest of this tool uses. That's a meaningfully
+different mechanism (and a different credential story), so it's left as
+a possible future addition rather than half-implemented here.
+
+### Example commands
+
+```sh
+# See what would be removed, without calling the SCM API
+pang reset -dry-run
+
+# Use the default playbook path (playbooks/reset.yml)
+pang reset
+
+# Point at a different playbook
+pang reset -playbook playbooks/other_reset.yml
+
+# Run the playbook but skip the automatic push, even if it sets push: true
+pang reset -no-push
+```
+
 ## update
 
 `update` refreshes gopangoblin in place: it downloads the current source
-zip from GitHub (the same `archive/refs/heads/<branch>.zip` URL `setup.ps`
+zip from GitHub (the same `archive/refs/heads/<branch>.zip` URL `setup.ps1`
 uses — no `git` checkout required), syncs it over the tool's own source
 files, and rebuilds the binary.
 
@@ -156,12 +260,15 @@ pang update              # or: go run . update
 ```
 
 Run it from the gopangoblin repo root (the directory containing `go.mod`
-— e.g. `gopangoblin-main` if it was set up via `setup.ps`). It requires the
+— e.g. `gopangoblin-main` if it was set up via `setup.ps1`). It requires the
 `go` toolchain on `PATH`.
 
-Only gopangoblin's own code is refreshed — `main.go`, `go.mod`, `go.sum`,
-`setup.ps`, `README.md`, `.gitignore`, and everything under `internal/`.
-Your `playbooks/` and `secret.txt` are never touched.
+`update` refreshes gopangoblin's own repo files by an explicit allowlist, not
+just `.go` files: `main.go`, `go.mod`, `go.sum`, `setup.ps1`, `README.md`,
+`.gitignore`, `LICENSE-APACHE`, `LICENSE-MIT`, and everything under
+`internal/` (including non-Go files that might live there). Anything outside
+that list — most importantly your `playbooks/` and `secret.txt` — is never
+touched, so local config and credentials survive an update untouched.
 
 Flags:
 
@@ -185,9 +292,11 @@ pang update -output pang-new
 main.go                         CLI entrypoint and tool dispatch
 internal/tool/                  Tool registry
 internal/habuilder/             habuilder tool: playbook parsing + reconciliation
-internal/habuilder/scm/         Minimal Strata Cloud Manager API client
+internal/reset/                 reset tool: playbook parsing + config wipe
+internal/scm/                   Strata Cloud Manager API client (shared by habuilder and reset)
 internal/update/                update tool: pulls source from GitHub and rebuilds
 playbooks/ha_pairs.yml          Example/working habuilder playbook
+playbooks/reset.yml             Example/working reset playbook
 ```
 
 ## License

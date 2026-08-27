@@ -8,3 +8,5 @@ secret.txt
 *.iml
 .idea/
 .vscode/
+playbooks/
+CLAUDE.md
