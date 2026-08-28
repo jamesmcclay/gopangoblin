@@ -72,8 +72,12 @@ func (t *Tool) Run(args []string) error {
 		return fmt.Errorf("listing SCM devices: %w", err)
 	}
 
+	// Folders are needed not just to resolve folder_list, but also (via
+	// their Parent/Snippets fields) to figure out which devices actually
+	// inherit from a wiped folder or snippet, so push can target them --
+	// so fetch them whenever either list is used, not just folder_list.
 	var folders []scm.Folder
-	if len(pb.FolderList) > 0 {
+	if len(pb.FolderList) > 0 || len(pb.SnippetList) > 0 {
 		folders, err = client.ListFolders()
 		if err != nil {
 			return fmt.Errorf("listing SCM folders: %w", err)
@@ -97,8 +101,10 @@ func (t *Tool) Run(args []string) error {
 	}
 
 	r := &reconciler{
-		client: client,
-		dryRun: *dryRun,
+		client:  client,
+		dryRun:  *dryRun,
+		devices: devices,
+		folders: folders,
 	}
 
 	fmt.Printf("reset: playbook %q, %d device(s), %d folder(s), %d snippet(s)\n",
@@ -132,8 +138,9 @@ func (t *Tool) Run(args []string) error {
 		}
 	}
 
-	if pb.Push && !*noPush && !*dryRun && len(r.touched) > 0 {
-		if err := pushChanges(client, pb, r.touched); err != nil {
+	touched := r.touchedSerials()
+	if pb.Push && !*noPush && !*dryRun && len(touched) > 0 {
+		if err := pushChanges(client, pb, touched); err != nil {
 			fmt.Fprintf(os.Stderr, "reset: push: %v\n", err)
 			failures++
 		}

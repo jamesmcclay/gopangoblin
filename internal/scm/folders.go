@@ -10,11 +10,14 @@ import (
 // etc.) live in. Folders nest (each has a Parent), and a device's own
 // per-device config is itself represented as a leaf folder in this same
 // hierarchy -- but reset only ever targets folders explicitly listed in
-// a playbook's folder_list, by name.
+// a playbook's folder_list, by name. Snippets lists the snippets directly
+// attached to this folder (inherited by every descendant folder/device),
+// used to figure out which devices are affected when a snippet is wiped.
 type Folder struct {
-	ID     string `json:"id"`
-	Name   string `json:"name"`
-	Parent string `json:"parent"`
+	ID       string   `json:"id"`
+	Name     string   `json:"name"`
+	Parent   string   `json:"parent"`
+	Snippets []string `json:"snippets,omitempty"`
 }
 
 type listFoldersResponse struct {

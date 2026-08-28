@@ -7,21 +7,100 @@ import (
 )
 
 type reconciler struct {
-	client *scm.Client
-	dryRun bool
+	client  *scm.Client
+	dryRun  bool
+	devices []scm.Device
+	folders []scm.Folder
 
 	// touched collects the serials of devices that actually had something
-	// removed this run (not ones already vanilla), so a subsequent push
-	// only targets what changed. Folder/snippet wipes never add to this:
-	// push only knows how to target devices, so wiping a shared
-	// folder/snippet only affects the candidate config for whichever
-	// devices inherit from it -- deploying that also requires those
-	// devices to be pushed, e.g. by listing them in fw_list too.
-	touched []string
+	// removed this run, or that inherit from a folder/snippet that did
+	// (see devicesUnderFolder/devicesUnderSnippet), so a subsequent push
+	// targets everything actually affected. Deduplicated, since a device
+	// can be reachable through more than one path (e.g. listed directly
+	// in fw_list AND a descendant of a wiped folder).
+	touched map[string]bool
 }
 
 func (r *reconciler) markTouched(serial string) {
-	r.touched = append(r.touched, serial)
+	if r.touched == nil {
+		r.touched = map[string]bool{}
+	}
+	r.touched[serial] = true
+}
+
+func (r *reconciler) touchedSerials() []string {
+	out := make([]string, 0, len(r.touched))
+	for s := range r.touched {
+		out = append(out, s)
+	}
+	return out
+}
+
+// folderAncestry returns name followed by every ancestor folder name up
+// to the root, using each folder's Parent field. Stops at the first name
+// not found in byName (e.g. the synthetic root) or on a cycle.
+func folderAncestry(name string, byName map[string]scm.Folder) []string {
+	chain := []string{name}
+	seen := map[string]bool{name: true}
+	for {
+		f, ok := byName[chain[len(chain)-1]]
+		if !ok || f.Parent == "" || seen[f.Parent] {
+			return chain
+		}
+		chain = append(chain, f.Parent)
+		seen[f.Parent] = true
+	}
+}
+
+func foldersByName(folders []scm.Folder) map[string]scm.Folder {
+	byName := make(map[string]scm.Folder, len(folders))
+	for _, f := range folders {
+		byName[f.Name] = f
+	}
+	return byName
+}
+
+// devicesUnderFolder returns every known device whose folder ancestry
+// includes folderName (directly or via an ancestor folder).
+func (r *reconciler) devicesUnderFolder(folderName string) []scm.Device {
+	byName := foldersByName(r.folders)
+	var out []scm.Device
+	for _, d := range r.devices {
+		for _, name := range folderAncestry(d.Folder, byName) {
+			if name == folderName {
+				out = append(out, d)
+				break
+			}
+		}
+	}
+	return out
+}
+
+// devicesUnderSnippet returns every known device whose folder ancestry
+// includes a folder that snippetName is directly attached to.
+func (r *reconciler) devicesUnderSnippet(snippetName string) []scm.Device {
+	byName := foldersByName(r.folders)
+
+	attached := map[string]bool{}
+	for _, f := range r.folders {
+		for _, s := range f.Snippets {
+			if s == snippetName {
+				attached[f.Name] = true
+				break
+			}
+		}
+	}
+
+	var out []scm.Device
+	for _, d := range r.devices {
+		for _, name := range folderAncestry(d.Folder, byName) {
+			if attached[name] {
+				out = append(out, d)
+				break
+			}
+		}
+	}
+	return out
 }
 
 func (r *reconciler) reconcileDevice(device scm.Device, fw ResolvedFirewall) error {
@@ -49,7 +128,9 @@ func (r *reconciler) reconcileFolder(folder scm.Folder) error {
 	}
 	if !changed {
 		fmt.Printf("  [skip]   %s already has no directly-owned config to remove\n", label)
+		return nil
 	}
+	r.markAffectedDevices(label, r.devicesUnderFolder(folder.Name))
 	return nil
 }
 
@@ -61,8 +142,26 @@ func (r *reconciler) reconcileSnippet(snippet scm.Snippet) error {
 	}
 	if !changed {
 		fmt.Printf("  [skip]   %s already has no directly-owned config to remove\n", label)
+		return nil
 	}
+	r.markAffectedDevices(label, r.devicesUnderSnippet(snippet.Name))
 	return nil
+}
+
+// markAffectedDevices marks every device in devices as touched, so a
+// folder/snippet wipe's changes actually get pushed to whatever inherits
+// from it, not just to devices that separately had their own device-owned
+// config removed.
+func (r *reconciler) markAffectedDevices(label string, devices []scm.Device) {
+	if len(devices) == 0 {
+		return
+	}
+	serials := make([]string, len(devices))
+	for i, d := range devices {
+		serials[i] = d.ID
+		r.markTouched(d.ID)
+	}
+	fmt.Printf("  [push]   %s change affects device(s): %v\n", label, serials)
 }
 
 // wipeScopedResources removes every scm.WipeResources object scoped
@@ -105,15 +204,19 @@ func (r *reconciler) wipeScopedResources(scopeParam, scopeValue, label string) (
 	// from its parent folder). Deleting by id would delete the shared
 	// object for everything that inherits it, not just this one scope, so
 	// every candidate is re-verified by a bare-id fetch before it's
-	// trusted for deletion.
+	// trusted for deletion. Nothing in scm.KnownBuiltInNames is ever
+	// deleted either -- that list only silences the log line below for
+	// built-ins that are expected to show up as inherited on every run.
 	var items []pending
 	for _, c := range candidates {
-		owned, err := r.client.IsScopedTo(c.resource.Path, c.id, scopeParam, scopeValue)
+		owned, obj, err := r.client.IsScopedTo(c.resource.Path, c.id, scopeParam, scopeValue)
 		if err != nil {
 			return false, fmt.Errorf("confirming scope of %s %q: %w", c.resource.Name, c.name, err)
 		}
 		if !owned {
-			fmt.Printf("  [shared] %s: not removing %s %q (%s) -- inherited from an ancestor folder/snippet, not owned directly here\n", label, c.resource.Name, c.name, c.id)
+			if !scm.KnownBuiltInNames[obj.Name] {
+				fmt.Printf("  [shared] %s: not removing %s %q (%s) -- inherited from an ancestor folder/snippet, not owned directly here\n", label, c.resource.Name, c.name, c.id)
+			}
 			continue
 		}
 		items = append(items, c)

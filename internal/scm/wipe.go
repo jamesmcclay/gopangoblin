@@ -37,6 +37,23 @@ var WipeResources = []WipeResource{
 	{Name: "logical-routers", Path: "/config/network/v1/logical-routers"},
 }
 
+// KnownBuiltInNames lists SCM's own built-in shared template variables --
+// e.g. "$eth-internet"/"$eth-local", the default untrust/trust interface
+// variables provided by the "All" folder and resolved per device as
+// ethernet1/3 and ethernet1/4 in this lab. These are always inherited,
+// never device/folder/snippet-owned, and are expected to show up on
+// every device -- so finding one isn't noteworthy the way finding some
+// other, unexpected shared object would be. reset never deletes them
+// either way (they fail the ownership check like anything else
+// inherited); this list only silences the "[shared] ... not removing"
+// log line for them specifically. Matched against an object's real
+// underlying name (as returned by a bare-id GetScopedObject fetch), not
+// whatever display name a scoped list resolved it to.
+var KnownBuiltInNames = map[string]bool{
+	"$eth-internet": true,
+	"$eth-local":    true,
+}
+
 // ScopedObject is the common shape shared by every folder/snippet/device
 // scoped SCM object list item: enough to identify an object and confirm
 // exactly which scope it belongs to, without needing each resource's full
@@ -146,24 +163,26 @@ func (c *Client) GetScopedObject(path, id string) (*ScopedObject, error) {
 // IsScopedTo reports whether the object at path/id is truly scoped
 // directly to scopeParam=scopeValue, as opposed to being inherited from
 // an ancestor folder/snippet and resolved into the queried scope's view
-// (see GetScopedObject).
-func (c *Client) IsScopedTo(path, id, scopeParam, scopeValue string) (bool, error) {
+// (see GetScopedObject). It also returns the object as fetched by that
+// required bare-id lookup, so callers needing its real underlying name
+// (e.g. to check AlwaysWipeNames) don't need a second fetch.
+func (c *Client) IsScopedTo(path, id, scopeParam, scopeValue string) (bool, *ScopedObject, error) {
 	obj, err := c.GetScopedObject(path, id)
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	if scopeField(*obj, scopeParam) != scopeValue {
-		return false, nil
+		return false, obj, nil
 	}
 	// Confirm the other two scope fields are empty, since a truly owned
 	// object should have exactly one of folder/snippet/device set.
 	switch scopeParam {
 	case "folder":
-		return obj.Snippet == "" && obj.Device == "", nil
+		return obj.Snippet == "" && obj.Device == "", obj, nil
 	case "snippet":
-		return obj.Folder == "" && obj.Device == "", nil
+		return obj.Folder == "" && obj.Device == "", obj, nil
 	default:
-		return obj.Folder == "" && obj.Snippet == "", nil
+		return obj.Folder == "" && obj.Snippet == "", obj, nil
 	}
 }
 

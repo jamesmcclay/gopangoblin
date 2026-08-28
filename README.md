@@ -181,12 +181,16 @@ snippet_list:
 ```
 
 - **push** — same semantics as habuilder: after wiping, automatically push
-  the candidate config to every *device* that actually had something
-  removed. Override with `-no-push` for one run. Push only knows how to
-  target devices — wiping a folder or snippet only changes the candidate
-  config for whatever inherits from it. To actually deploy that, list the
-  affected devices in `fw_list` too (or push separately, e.g. from the
-  SCM UI).
+  the candidate config to every device actually affected this run.
+  Override with `-no-push` for one run. Push only knows how to target
+  devices, but wiping a folder or snippet changes the candidate config for
+  every device that inherits from it, not just devices listed in
+  `fw_list` — so `reset` works out which devices those are (by walking
+  each device's folder ancestry, and each folder's attached snippets) and
+  pushes to all of them automatically. That resolution only covers
+  devices this service account can see via `ListDevices`; anything else
+  inheriting the same folder/snippet (e.g. in a different tenant scope)
+  still needs a separate push.
 - **folder_list / snippet_list** — folders and snippets to wipe directly
   (not the devices that happen to inherit from them). `name` is required
   and is what SCM's object-scoping APIs actually key on (`folder=<name>`,
@@ -212,7 +216,12 @@ re-verifies every candidate object with a second, unfiltered lookup
 before deleting it, and only ever deletes objects confirmed to be owned
 directly by the exact device/folder/snippet being wiped. Anything found
 to actually be inherited is logged as `[shared] ... not removing ...`
-and left alone.
+and left alone — except SCM's own built-in template variables
+(`internal/scm/wipe.go`'s `KnownBuiltInNames`, e.g. `$eth-internet`/
+`$eth-local`, the default untrust/trust interfaces provided by the "All"
+folder and resolved per device as `ethernet1/3`/`ethernet1/4` in this
+lab), which are still never deleted but are expected to show up as
+inherited on every run, so that specific log line is silenced for them.
 
 A second, distinct case of this: a rule can be *materialized from a
 snippet attached to a folder* and report its scope as that folder with no
