@@ -1,13 +1,15 @@
 package scm
 
 import (
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"net/url"
 )
 
 // WipeResource identifies one folder/snippet/device-scoped SCM resource
-// type that reset can enumerate and delete for a single device.
+// type that reset can enumerate and delete for a single device, folder,
+// or snippet.
 type WipeResource struct {
 	Name string // human-readable, e.g. "security-rules"
 	Path string // e.g. "/config/security/v1/security-rules"
@@ -16,8 +18,8 @@ type WipeResource struct {
 	Positions []string
 }
 
-// WipeResources is the set of resource types reset wipes for a device,
-// covering the config the SCM API confirms is folder/snippet/device-scoped.
+// WipeResources is the set of resource types reset wipes, covering the
+// config the SCM API confirms is folder/snippet/device-scoped.
 // This list isn't exhaustive of every possible NGFW config resource (e.g.
 // sub-interfaces, DoS/decryption/app-override/QoS/SDWAN rules, PBF, EDLs
 // aren't included), so a device with config in one of those isn't
@@ -54,23 +56,39 @@ type listScopedResponse struct {
 	Total  int            `json:"total"`
 }
 
-// ListByDevice returns every object at path that is scoped directly to
-// deviceID, paginating as needed. If position is non-empty it's passed as
-// the "position" query param required by rule-family resources.
+// scopeField returns the field of obj that corresponds to scopeParam
+// ("device", "folder", or "snippet").
+func scopeField(obj ScopedObject, scopeParam string) string {
+	switch scopeParam {
+	case "folder":
+		return obj.Folder
+	case "snippet":
+		return obj.Snippet
+	default:
+		return obj.Device
+	}
+}
+
+// ListByScope returns every object at path that is scoped directly to
+// scopeParam=scopeValue ("device", "folder", or "snippet"), paginating as
+// needed. If position is non-empty it's passed as the "position" query
+// param required by rule-family resources.
 //
-// Objects are filtered to require Device == deviceID even though the
-// device query param should already exclude folder/snippet-scoped
-// objects: shared folder/snippet config must never be deleted by reset,
-// so this is enforced again defensively rather than trusted on the
-// server's filtering alone.
-func (c *Client) ListByDevice(path, deviceID, position string) ([]ScopedObject, error) {
+// Objects are filtered to require the matching scope field to equal
+// scopeValue even though the query parameter should already guarantee
+// that: SCM's scoped list endpoints resolve config inherited from an
+// ancestor folder/snippet into the queried scope's view and echo that
+// scope back in the response regardless of the object's real owner, so
+// this is enforced again defensively rather than trusted on the server's
+// filtering alone.
+func (c *Client) ListByScope(path, scopeParam, scopeValue, position string) ([]ScopedObject, error) {
 	const pageSize = 200
 
 	var all []ScopedObject
 	offset := 0
 	for {
 		q := url.Values{}
-		q.Set("device", deviceID)
+		q.Set(scopeParam, scopeValue)
 		q.Set("limit", fmt.Sprintf("%d", pageSize))
 		q.Set("offset", fmt.Sprintf("%d", offset))
 		if position != "" {
@@ -82,7 +100,7 @@ func (c *Client) ListByDevice(path, deviceID, position string) ([]ScopedObject, 
 			return nil, fmt.Errorf("listing %s: %w", path, err)
 		}
 		for _, obj := range page.Data {
-			if obj.Device == deviceID {
+			if scopeField(obj, scopeParam) == scopeValue {
 				all = append(all, obj)
 			}
 		}
@@ -104,17 +122,19 @@ func (c *Client) DeleteByID(path, id string) error {
 // folder/snippet/device query filter, and returns just its identity/scope
 // fields (ignoring whatever other fields that resource type actually has).
 //
-// This matters because SCM's device-filtered list endpoints resolve
-// folder/snippet-scoped (shared) objects into a device's view and echo
-// that device back in the response's "device" field, indistinguishably
-// from a truly device-owned object -- confirmed live against the lab: a
-// shared "$eth-internet" template stored under folder "ngfw-shared" is
-// returned with "device": "<serial>" and no folder/snippet field for
-// every device that inherits it, using the identical object id in every
-// case. A bare-id fetch (no query params) returns the object's real
-// stored scope instead, so it's the only reliable way to confirm an
-// object found via a device-filtered list is actually safe to delete or
-// overwrite.
+// This matters because SCM's scoped list endpoints resolve config
+// inherited from an ancestor folder/snippet into the queried scope's view
+// and echo that scope back in the response's "device"/"folder"/"snippet"
+// field, indistinguishably from an object truly owned by that scope --
+// confirmed live against the lab: a shared "$eth-internet" template
+// stored under folder "ngfw-shared" is returned with "device": "<serial>"
+// and no folder/snippet field for every device that inherits it, using
+// the identical object id in every case; the same inheritance applies up
+// the folder hierarchy (e.g. folder "Lab Firewalls" inheriting from
+// parent folder "ngfw-shared"). A bare-id fetch (no query params) returns
+// the object's real stored scope instead, so it's the only reliable way
+// to confirm an object found via a scoped list is actually safe to
+// delete or overwrite.
 func (c *Client) GetScopedObject(path, id string) (*ScopedObject, error) {
 	var obj ScopedObject
 	if err := c.doJSON("GET", path+"/"+id, nil, nil, &obj); err != nil {
@@ -123,15 +143,28 @@ func (c *Client) GetScopedObject(path, id string) (*ScopedObject, error) {
 	return &obj, nil
 }
 
-// IsDeviceOwned reports whether the object at path/id is truly scoped
-// directly to deviceID, as opposed to a folder/snippet-shared object
-// resolved into that device's view (see GetScopedObject).
-func (c *Client) IsDeviceOwned(path, id, deviceID string) (bool, error) {
+// IsScopedTo reports whether the object at path/id is truly scoped
+// directly to scopeParam=scopeValue, as opposed to being inherited from
+// an ancestor folder/snippet and resolved into the queried scope's view
+// (see GetScopedObject).
+func (c *Client) IsScopedTo(path, id, scopeParam, scopeValue string) (bool, error) {
 	obj, err := c.GetScopedObject(path, id)
 	if err != nil {
 		return false, err
 	}
-	return obj.Device == deviceID && obj.Folder == "" && obj.Snippet == "", nil
+	if scopeField(*obj, scopeParam) != scopeValue {
+		return false, nil
+	}
+	// Confirm the other two scope fields are empty, since a truly owned
+	// object should have exactly one of folder/snippet/device set.
+	switch scopeParam {
+	case "folder":
+		return obj.Snippet == "" && obj.Device == "", nil
+	case "snippet":
+		return obj.Folder == "" && obj.Device == "", nil
+	default:
+		return obj.Folder == "" && obj.Snippet == "", nil
+	}
 }
 
 // IsConflict reports whether err is a 409 response, which SCM returns when
@@ -140,4 +173,41 @@ func (c *Client) IsDeviceOwned(path, id, deviceID string) (bool, error) {
 func IsConflict(err error) bool {
 	apiErr, ok := err.(*APIError)
 	return ok && apiErr.StatusCode == http.StatusConflict
+}
+
+// IsDeleteNotAllowed reports whether err is SCM's "DELETE_NOT_ALLOWED"
+// business-rule rejection. Confirmed live: a security-rule and nat-rule
+// materialized from a snippet attached to a folder both report their
+// scope as that folder (passing an IsScopedTo check, with no snippet
+// field visible anywhere in their JSON body) yet still reject deletion
+// with this error -- SCM tracks snippet provenance internally, invisibly
+// to IsScopedTo's plain field check, and only enforces it at delete time.
+// Unlike a 409 conflict, retrying this later won't help: the object can
+// only be removed by detaching the snippet itself, which reset doesn't
+// do, so callers should treat this as a permanent skip.
+func IsDeleteNotAllowed(err error) bool {
+	apiErr, ok := err.(*APIError)
+	if !ok {
+		return false
+	}
+	var parsed struct {
+		Errors []struct {
+			Details struct {
+				Errors []struct {
+					Type string `json:"type"`
+				} `json:"errors"`
+			} `json:"details"`
+		} `json:"_errors"`
+	}
+	if json.Unmarshal(apiErr.Body, &parsed) != nil {
+		return false
+	}
+	for _, e := range parsed.Errors {
+		for _, d := range e.Details.Errors {
+			if d.Type == "DELETE_NOT_ALLOWED" {
+				return true
+			}
+		}
+	}
+	return false
 }

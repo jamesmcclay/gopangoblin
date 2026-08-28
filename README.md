@@ -149,12 +149,15 @@ pang help
 
 ## reset
 
-`reset` wipes a device's own configuration back to a vanilla baseline:
-network interfaces, zones, logical routers, security/NAT rules, and
-objects (addresses, address-groups, services, service-groups, tags), plus
-any HA configuration habuilder created. It does **not** touch the
-device's management interface or DNS settings — see "What reset doesn't
-do" below — and it never touches the device's SCM registration itself.
+`reset` wipes configuration back to a vanilla baseline for a list of
+devices, folders, and/or snippets: network interfaces, zones, logical
+routers, security/NAT rules, and objects (addresses, address-groups,
+services, service-groups, tags), plus any HA configuration habuilder
+created (device targets only — HA config is always device-scoped). It
+does **not** touch a device's management interface or DNS settings — see
+"What reset doesn't do" below — and it never touches SCM registration,
+the folder/snippet objects themselves, or any device's `folder`/`snippet`
+associations.
 
 It uses the same SCM credentials as habuilder (flags or
 `SCM_CLIENT_ID`/`SCM_CLIENT_SECRET`/`SCM_TSG_ID`).
@@ -163,32 +166,62 @@ It uses the same SCM credentials as habuilder (flags or
 
 ```yaml
 name: JamesTheGreat's Reset Firewalls
-push: true                  # push the wipe to the firewalls automatically
+push: true                  # push device wipes to the firewalls automatically
 fw_list:
   - name: James Lab A
     serial: 12345
   - name: James Lab B
     serial: 67890
+folder_list:
+  - name: Lab Firewalls
+    id: d1df72e8-f008-4c32-9fad-f0dc64816c4d
+snippet_list:
+  - name: Basic-Active-Passive-HA
+    id: 4138508b-70fe-436d-a932-658b9feed426
 ```
 
 - **push** — same semantics as habuilder: after wiping, automatically push
-  the candidate config to every device that actually had something
-  removed. Override with `-no-push` for one run.
+  the candidate config to every *device* that actually had something
+  removed. Override with `-no-push` for one run. Push only knows how to
+  target devices — wiping a folder or snippet only changes the candidate
+  config for whatever inherits from it. To actually deploy that, list the
+  affected devices in `fw_list` too (or push separately, e.g. from the
+  SCM UI).
+- **folder_list / snippet_list** — folders and snippets to wipe directly
+  (not the devices that happen to inherit from them). `name` is required
+  and is what SCM's object-scoping APIs actually key on (`folder=<name>`,
+  `snippet=<name>`); `id` is optional and, if set, is cross-checked
+  against the folder/snippet's real server-assigned id (from SCM's
+  `/folders`/`/snippets`) before anything runs, catching a stale or
+  mistyped `name` pointing at the wrong one. Folder/snippet wiping isn't
+  recursive: a child folder must be listed separately if you want it
+  wiped too.
 
-### Safety: shared folder/snippet config is never touched
+### Safety: inherited config is never touched
 
-SCM devices can inherit configuration from a shared folder or snippet
-(e.g. every onboarded NGFW in this lab inherits a default `ethernet1/3`
-"Internet Interface" and `ethernet1/4` "Internal Interface" from a shared
-`ngfw-shared` folder template). SCM's device-filtered list API resolves
-those shared objects into a device's view and echoes that device back in
-the response as if the object belonged to it — confirmed live, including
-the same object id being returned identically for every device that
-inherits it. `reset` re-verifies every candidate object with a second,
-unfiltered lookup before deleting it, and only ever deletes objects
-confirmed to be owned directly by that one device. Anything found to
-actually be folder/snippet-shared is logged as `[shared] ... not
-removing ...` and left alone.
+SCM config objects can be inherited from an ancestor folder or snippet —
+a device inherits from its containing folder, and a folder inherits from
+its parent folder up the tree (e.g. every onboarded NGFW in this lab
+inherits a default `ethernet1/3` "Internet Interface" from a shared
+`ngfw-shared` folder template several levels up from the device itself).
+SCM's scoped list API resolves that inherited config into whatever scope
+you queried and echoes that scope back in the response as if the object
+belonged there directly — confirmed live, including the same object id
+being returned identically for every scope that inherits it. `reset`
+re-verifies every candidate object with a second, unfiltered lookup
+before deleting it, and only ever deletes objects confirmed to be owned
+directly by the exact device/folder/snippet being wiped. Anything found
+to actually be inherited is logged as `[shared] ... not removing ...`
+and left alone.
+
+A second, distinct case of this: a rule can be *materialized from a
+snippet attached to a folder* and report its scope as that folder with no
+visible sign it came from a snippet — passing the check above — yet SCM
+still refuses to delete it via the folder, returning a `DELETE_NOT_ALLOWED`
+error (confirmed live against this lab's `Basic-Active-Passive-HA`
+snippet). `reset` treats that error as a permanent, non-fatal skip
+(logged the same way) rather than aborting the run — it can only be
+removed by detaching the snippet itself, which `reset` doesn't do.
 
 ### How the wipe works (and its limits)
 
@@ -197,15 +230,15 @@ verb — there's no wholesale replace. It's structured like Kubernetes' or
 Terraform's provider APIs: individually typed resources (zones, rules,
 interfaces, objects, ...), each with its own list/get/create/update/delete
 endpoints, not a single document you can PUT as a whole. So `reset` wipes
-a device by enumerating a fixed list of known resource types
-(`internal/scm/wipe.go`'s `WipeResources`) and deleting whatever's found
-and confirmed device-owned.
+a device, folder, or snippet by enumerating a fixed list of known
+resource types (`internal/scm/wipe.go`'s `WipeResources`) and deleting
+whatever's found and confirmed directly owned by that scope.
 
 That list isn't exhaustive — PBF rules, DoS/decryption/app-override/QoS/
 SDWAN rules, sub-interfaces, external dynamic lists, and others aren't
-covered yet, so a device using one of those config types isn't guaranteed
+covered yet, so a target using one of those config types isn't guaranteed
 fully vanilla after a reset. Extend `WipeResources` as gaps are found; a
-device with an unlisted resource type just won't have that particular
+target with an unlisted resource type just won't have that particular
 config removed, it won't cause an error.
 
 ### What reset doesn't do

@@ -72,12 +72,37 @@ func (t *Tool) Run(args []string) error {
 		return fmt.Errorf("listing SCM devices: %w", err)
 	}
 
+	var folders []scm.Folder
+	if len(pb.FolderList) > 0 {
+		folders, err = client.ListFolders()
+		if err != nil {
+			return fmt.Errorf("listing SCM folders: %w", err)
+		}
+	}
+	resolvedFolders, err := resolveFolders(pb.FolderList, folders)
+	if err != nil {
+		return err
+	}
+
+	var snippets []scm.Snippet
+	if len(pb.SnippetList) > 0 {
+		snippets, err = client.ListSnippets()
+		if err != nil {
+			return fmt.Errorf("listing SCM snippets: %w", err)
+		}
+	}
+	resolvedSnippets, err := resolveSnippets(pb.SnippetList, snippets)
+	if err != nil {
+		return err
+	}
+
 	r := &reconciler{
 		client: client,
 		dryRun: *dryRun,
 	}
 
-	fmt.Printf("reset: playbook %q, %d device(s)\n", pb.Name, len(fws))
+	fmt.Printf("reset: playbook %q, %d device(s), %d folder(s), %d snippet(s)\n",
+		pb.Name, len(fws), len(resolvedFolders), len(resolvedSnippets))
 
 	var failures int
 	for _, fw := range fws {
@@ -93,6 +118,20 @@ func (t *Tool) Run(args []string) error {
 		}
 	}
 
+	for _, f := range resolvedFolders {
+		if err := r.reconcileFolder(f); err != nil {
+			fmt.Fprintf(os.Stderr, "reset: folder %s: %v\n", f.Name, err)
+			failures++
+		}
+	}
+
+	for _, s := range resolvedSnippets {
+		if err := r.reconcileSnippet(s); err != nil {
+			fmt.Fprintf(os.Stderr, "reset: snippet %s: %v\n", s.Name, err)
+			failures++
+		}
+	}
+
 	if pb.Push && !*noPush && !*dryRun && len(r.touched) > 0 {
 		if err := pushChanges(client, pb, r.touched); err != nil {
 			fmt.Fprintf(os.Stderr, "reset: push: %v\n", err)
@@ -104,6 +143,41 @@ func (t *Tool) Run(args []string) error {
 		return fmt.Errorf("%d device(s) failed, see above", failures)
 	}
 	return nil
+}
+
+// resolveFolders matches each folder_list entry to a real SCM folder by
+// name, and, if the entry specifies an id, confirms it matches the
+// folder's actual server-assigned id -- catching a stale or mistyped name
+// pointing at a folder other than the one the user intended.
+func resolveFolders(entries []FolderEntry, live []scm.Folder) ([]scm.Folder, error) {
+	out := make([]scm.Folder, 0, len(entries))
+	for _, e := range entries {
+		f, err := scm.ResolveFolderByName(live, e.Name)
+		if err != nil {
+			return nil, fmt.Errorf("folder_list entry %q: %w", e.Name, err)
+		}
+		if e.ID != "" && e.ID != f.ID {
+			return nil, fmt.Errorf("folder_list entry %q: id %q does not match this folder's actual id %q -- update the playbook or remove the id field", e.Name, e.ID, f.ID)
+		}
+		out = append(out, f)
+	}
+	return out, nil
+}
+
+// resolveSnippets is the snippet_list analogue of resolveFolders.
+func resolveSnippets(entries []SnippetEntry, live []scm.Snippet) ([]scm.Snippet, error) {
+	out := make([]scm.Snippet, 0, len(entries))
+	for _, e := range entries {
+		s, err := scm.ResolveSnippetByName(live, e.Name)
+		if err != nil {
+			return nil, fmt.Errorf("snippet_list entry %q: %w", e.Name, err)
+		}
+		if e.ID != "" && e.ID != s.ID {
+			return nil, fmt.Errorf("snippet_list entry %q: id %q does not match this snippet's actual id %q -- update the playbook or remove the id field", e.Name, e.ID, s.ID)
+		}
+		out = append(out, s)
+	}
+	return out, nil
 }
 
 // pushChanges triggers an SCM candidate-config push for the given device

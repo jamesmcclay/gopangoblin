@@ -9,15 +9,33 @@ import (
 
 // Playbook is the parsed structure of a reset.yml file.
 type Playbook struct {
-	Name   string          `yaml:"name"`
-	Push   bool            `yaml:"push"`
-	FwList []FirewallEntry `yaml:"fw_list"`
+	Name        string          `yaml:"name"`
+	Push        bool            `yaml:"push"`
+	FwList      []FirewallEntry `yaml:"fw_list"`
+	FolderList  []FolderEntry   `yaml:"folder_list"`
+	SnippetList []SnippetEntry  `yaml:"snippet_list"`
 }
 
 // FirewallEntry is one device entry under fw_list.
 type FirewallEntry struct {
 	Name   string `yaml:"name"`
 	Serial string `yaml:"serial"`
+}
+
+// FolderEntry is one folder entry under folder_list. Name is what SCM's
+// object-scoping APIs actually key on (folder=<name>), so it's required.
+// ID is optional: if set, it's cross-checked against the folder's real,
+// server-assigned id (from SCM's /folders resource) before anything is
+// wiped, catching a stale/mistyped name pointing at the wrong folder.
+type FolderEntry struct {
+	Name string `yaml:"name"`
+	ID   string `yaml:"id"`
+}
+
+// SnippetEntry is the snippet_list analogue of FolderEntry.
+type SnippetEntry struct {
+	Name string `yaml:"name"`
+	ID   string `yaml:"id"`
 }
 
 // ResolvedFirewall is a validated FirewallEntry, ready for reset to act on.
@@ -46,8 +64,8 @@ func LoadPlaybook(path string) (*Playbook, error) {
 		return nil, fmt.Errorf("parsing playbook: %w", err)
 	}
 
-	if len(pb.FwList) == 0 {
-		return nil, fmt.Errorf("playbook has no fw_list entries")
+	if len(pb.FwList) == 0 && len(pb.FolderList) == 0 && len(pb.SnippetList) == 0 {
+		return nil, fmt.Errorf("playbook has no fw_list, folder_list, or snippet_list entries")
 	}
 
 	return &pb, nil
