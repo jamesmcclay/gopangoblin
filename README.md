@@ -174,10 +174,10 @@ fw_list:
     serial: 67890
 folder_list:
   - name: Lab Firewalls
-    id: d1df72e8-f008-4c32-9fad-f0dc64816c4d
+    id: 11111111-1111-1111-1111-111111111111
 snippet_list:
   - name: Basic-Active-Passive-HA
-    id: 4138508b-70fe-436d-a932-658b9feed426
+    id: 22222222-2222-2222-2222-222222222222
 ```
 
 - **push** — same semantics as habuilder: after wiping, automatically push
