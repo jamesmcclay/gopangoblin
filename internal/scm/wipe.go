@@ -33,6 +33,7 @@ var WipeResources = []WipeResource{
 	{Name: "services", Path: "/config/objects/v1/services"},
 	{Name: "tags", Path: "/config/objects/v1/tags"},
 	{Name: "zones", Path: "/config/network/v1/zones"},
+	{Name: "dhcp-interfaces", Path: "/config/network/v1/dhcp-interfaces"},
 	{Name: "ethernet-interfaces", Path: "/config/network/v1/ethernet-interfaces"},
 	{Name: "logical-routers", Path: "/config/network/v1/logical-routers"},
 }
