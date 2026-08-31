@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 
 	_ "github.com/jamesmcclay/gopangoblin/internal/habuilder"
+	_ "github.com/jamesmcclay/gopangoblin/internal/internet"
 	_ "github.com/jamesmcclay/gopangoblin/internal/reset"
 	"github.com/jamesmcclay/gopangoblin/internal/tool"
 	_ "github.com/jamesmcclay/gopangoblin/internal/update"

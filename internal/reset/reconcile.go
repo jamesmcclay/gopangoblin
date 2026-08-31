@@ -14,8 +14,9 @@ type reconciler struct {
 
 	// touched collects the serials of devices that actually had something
 	// removed this run, or that inherit from a folder/snippet that did
-	// (see devicesUnderFolder/devicesUnderSnippet), so a subsequent push
-	// targets everything actually affected. Deduplicated, since a device
+	// (see scm.DevicesUnderFolder/scm.DevicesUnderSnippet), so a
+	// subsequent push targets everything actually affected. Deduplicated,
+	// since a device
 	// can be reachable through more than one path (e.g. listed directly
 	// in fw_list AND a descendant of a wiped folder).
 	touched map[string]bool
@@ -32,73 +33,6 @@ func (r *reconciler) touchedSerials() []string {
 	out := make([]string, 0, len(r.touched))
 	for s := range r.touched {
 		out = append(out, s)
-	}
-	return out
-}
-
-// folderAncestry returns name followed by every ancestor folder name up
-// to the root, using each folder's Parent field. Stops at the first name
-// not found in byName (e.g. the synthetic root) or on a cycle.
-func folderAncestry(name string, byName map[string]scm.Folder) []string {
-	chain := []string{name}
-	seen := map[string]bool{name: true}
-	for {
-		f, ok := byName[chain[len(chain)-1]]
-		if !ok || f.Parent == "" || seen[f.Parent] {
-			return chain
-		}
-		chain = append(chain, f.Parent)
-		seen[f.Parent] = true
-	}
-}
-
-func foldersByName(folders []scm.Folder) map[string]scm.Folder {
-	byName := make(map[string]scm.Folder, len(folders))
-	for _, f := range folders {
-		byName[f.Name] = f
-	}
-	return byName
-}
-
-// devicesUnderFolder returns every known device whose folder ancestry
-// includes folderName (directly or via an ancestor folder).
-func (r *reconciler) devicesUnderFolder(folderName string) []scm.Device {
-	byName := foldersByName(r.folders)
-	var out []scm.Device
-	for _, d := range r.devices {
-		for _, name := range folderAncestry(d.Folder, byName) {
-			if name == folderName {
-				out = append(out, d)
-				break
-			}
-		}
-	}
-	return out
-}
-
-// devicesUnderSnippet returns every known device whose folder ancestry
-// includes a folder that snippetName is directly attached to.
-func (r *reconciler) devicesUnderSnippet(snippetName string) []scm.Device {
-	byName := foldersByName(r.folders)
-
-	attached := map[string]bool{}
-	for _, f := range r.folders {
-		for _, s := range f.Snippets {
-			if s == snippetName {
-				attached[f.Name] = true
-				break
-			}
-		}
-	}
-
-	var out []scm.Device
-	for _, d := range r.devices {
-		for _, name := range folderAncestry(d.Folder, byName) {
-			if attached[name] {
-				out = append(out, d)
-				break
-			}
-		}
 	}
 	return out
 }
@@ -130,7 +64,7 @@ func (r *reconciler) reconcileFolder(folder scm.Folder) error {
 		fmt.Printf("  [skip]   %s already has no directly-owned config to remove\n", label)
 		return nil
 	}
-	r.markAffectedDevices(label, r.devicesUnderFolder(folder.Name))
+	r.markAffectedDevices(label, scm.DevicesUnderFolder(r.devices, r.folders, folder.Name))
 	return nil
 }
 
@@ -144,7 +78,7 @@ func (r *reconciler) reconcileSnippet(snippet scm.Snippet) error {
 		fmt.Printf("  [skip]   %s already has no directly-owned config to remove\n", label)
 		return nil
 	}
-	r.markAffectedDevices(label, r.devicesUnderSnippet(snippet.Name))
+	r.markAffectedDevices(label, scm.DevicesUnderSnippet(r.devices, r.folders, snippet.Name))
 	return nil
 }
 

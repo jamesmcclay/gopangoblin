@@ -99,6 +99,28 @@ func scopeField(obj ScopedObject, scopeParam string) string {
 // this is enforced again defensively rather than trusted on the server's
 // filtering alone.
 func (c *Client) ListByScope(path, scopeParam, scopeValue, position string) ([]ScopedObject, error) {
+	all, err := c.ListVisible(path, scopeParam, scopeValue, position)
+	if err != nil {
+		return nil, err
+	}
+	owned := all[:0]
+	for _, obj := range all {
+		if scopeField(obj, scopeParam) == scopeValue {
+			owned = append(owned, obj)
+		}
+	}
+	return owned, nil
+}
+
+// ListVisible returns every object at path visible from
+// scopeParam=scopeValue ("device", "folder", or "snippet"), paginating as
+// needed, INCLUDING objects inherited from an ancestor folder/snippet.
+// Unlike ListByScope, no defensive scope-field filter is applied: use
+// this when a caller genuinely wants to search the whole visible
+// hierarchy (e.g. to find whichever existing logical-router already owns
+// a given interface, which is commonly a shared ancestor one) rather than
+// only objects safe to delete or overwrite.
+func (c *Client) ListVisible(path, scopeParam, scopeValue, position string) ([]ScopedObject, error) {
 	const pageSize = 200
 
 	var all []ScopedObject
@@ -116,11 +138,7 @@ func (c *Client) ListByScope(path, scopeParam, scopeValue, position string) ([]S
 		if err := c.doJSON("GET", path, q, nil, &page); err != nil {
 			return nil, fmt.Errorf("listing %s: %w", path, err)
 		}
-		for _, obj := range page.Data {
-			if scopeField(obj, scopeParam) == scopeValue {
-				all = append(all, obj)
-			}
-		}
+		all = append(all, page.Data...)
 
 		offset += len(page.Data)
 		if len(page.Data) == 0 || offset >= page.Total {

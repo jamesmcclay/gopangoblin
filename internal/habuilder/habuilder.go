@@ -112,14 +112,14 @@ func pushChanges(client *scm.Client, pb *Playbook, serials []string) error {
 	}
 
 	fmt.Printf("habuilder: push job %s enqueued, waiting for completion...\n", result.JobID)
-	job, err := client.WaitForJob(result.JobID, pushJobTimeout, pushJobPollFreq)
+	outcome, err := client.WaitForPush(result.JobID, len(serials), pushJobTimeout, pushJobPollFreq)
 	if err != nil {
 		return err
 	}
-	if job.ResultStr != "OK" {
-		return fmt.Errorf("push job %s finished with result %s: %s", job.ID, job.ResultStr, job.Details)
+	if outcome.Failed() {
+		return fmt.Errorf("push job %s failed: %s", result.JobID, outcome.Summary())
 	}
 
-	fmt.Printf("habuilder: push job %s completed successfully\n", job.ID)
+	fmt.Printf("habuilder: push job %s completed successfully on %d device(s)\n", result.JobID, len(outcome.DeviceJobs))
 	return nil
 }

@@ -11,6 +11,9 @@ tool lives under `internal/<toolname>` and is registered with the top-level
 - **reset** — wipes a device's own SCM-managed configuration (interfaces,
   zones, routing, security/NAT rules, objects, HA config) back to a vanilla
   baseline, for a list of firewalls defined in a YAML playbook.
+- **internet** — configures basic internet access (trust/untrust interfaces,
+  a LAN DHCP server, a default SNAT rule, and an allow-all security policy)
+  on a list of folders, snippets, and/or firewalls defined in a YAML playbook.
 - **update** — pulls the latest gopangoblin source from GitHub and rebuilds.
 
 ## Setup (Windows / PowerShell)
@@ -290,6 +293,155 @@ pang reset -playbook playbooks/other_reset.yml
 pang reset -no-push
 ```
 
+## internet
+
+`internet` configures basic internet access on a folder, snippet, or
+firewall: a trust interface with a LAN IP and DHCP server, an untrust
+interface (DHCP client, or static with its own default route), a NAT rule
+for outbound SNAT via the untrust interface, and a security rule allowing
+all trust→untrust traffic. It uses the same SCM credentials as
+habuilder/reset.
+
+### Playbook format (`internet.yml`)
+
+```yaml
+name: James Internet Firewalls
+push: true
+mode: install-override        # install | install-override | uninstall
+vars:
+  default_trust_interface: "$eth-local"
+  default_untrust_interface: "$eth-internet"
+  default_lan_cidr: "$lan_cidr"
+  default_dns_server: "8.8.8.8"
+  default_dhcp_pool: "$lan_pool"     # optional -- see below
+  default_lan_gw: "$lan_gw"          # optional -- see below
+  default_wan_cidr: "$wan_cidr"      # optional -- see below
+  default_wan_gw: "$wan_gw"          # optional -- see below
+item_list:
+  - name: Lab Firewalls
+    type: folder                # folder | snippet | firewall
+variable_overrides:
+  - name: Lab FW A
+    serial: 007954000891379
+    var_list:
+      - name: "$lan_cidr"
+        value: "10.0.0.1/24"
+      - name: "$lan_gw"
+        value: "10.0.0.1"
+      - name: "$lan_pool"
+        value: "10.0.0.128-10.0.0.254"
+      - name: "$wan_cidr"           # only if you want a static WAN IP
+        value: "192.168.123.2/24"
+      - name: "$wan_gw"             # only if you want a static WAN IP
+        value: "192.168.123.1"
+```
+
+- **mode** — `install` configures only targets missing internet access
+  (every piece below is checked, not just the untrust interface, so a
+  partially-completed prior run can still be finished); `install-override`
+  reconfigures every target regardless of current state; `uninstall`
+  removes everything this tool created.
+- **item_list** — each entry's `type` is `folder`, `snippet`, or
+  `firewall`. A `firewall` entry needs `serial` (its own field — `name` is
+  just a display label for all three types, not looked up in SCM).
+- **trust_interface / untrust_interface** — an SCM interface name, either
+  literal (`ethernet1/4`) or a `$variable` (e.g. SCM's built-in
+  `$eth-local`/`$eth-internet`). The untrust interface is DHCP client by
+  default; it only becomes static (using `wan_cidr`/`wan_gw`, plus a
+  manual default route since DHCP's auto-route won't apply) when **both**
+  resolve to a real value — so `wan_cidr`/`wan_gw` have no required
+  default, unlike the other fields.
+- **lan_cidr** — the trust interface's own static IP/netmask, and the
+  network the LAN DHCP server serves.
+- **dhcp_pool** — the DHCP server's address pool range (e.g.
+  `10.0.0.128-10.0.0.254`). Optional when `lan_cidr` is a literal CIDR (a
+  reasonable pool covering the upper half of the network is auto-derived);
+  required when `lan_cidr` is a `$variable`, since there's then no
+  concrete network to derive a pool from until SCM resolves it per device.
+- **lan_gw** — the gateway address the DHCP server hands to LAN clients.
+  Same optional/required rule as `dhcp_pool` (auto-derived from a literal
+  `lan_cidr`, required when `lan_cidr` is a `$variable`). This must be a
+  bare IP, no netmask — confirmed live, PAN-OS's DHCP gateway field
+  rejects a `/nn` suffix.
+- **variable_overrides** — writes per-firewall values for SCM
+  `$variable`s referenced above (device-scoped). `internet` also creates a
+  matching parent definition at the item's own folder/snippet/device scope
+  automatically wherever needed (see "How `$variable`s are resolved"
+  below) — you only need to supply the per-device override values here.
+
+### What gets created
+
+For each item, in order: the trust and untrust interfaces (static or DHCP
+client); zone membership for both (a zone named `trust`/`untrust` is
+created if the interface isn't already zoned elsewhere — e.g. SCM's
+built-ins are usually already zoned `local`/`internet`, and that's left
+as-is rather than re-zoned); routing (likewise, an interface already
+routed via an existing logical-router — commonly a shared one several
+folders up — is left alone; only a genuinely unrouted interface gets a
+new router); a LAN DHCP server; a NAT rule (`dynamic_ip_and_port` SNAT via
+the untrust interface's own address); and a security rule allowing all
+trust→untrust traffic (`application`/`service`/`category` all `any` — see
+"Why not SCM's 'Internet Access Rule'" below).
+
+### How `$variable`s are resolved
+
+SCM's per-device template variables need a *definition* at (or above) the
+scope of whatever references them, in addition to each device's own
+*override* value from `variable_overrides` — confirmed live two ways: a
+route's gateway field rejects a `$variable` outright as "not a valid
+reference" without one, and even a field that accepts the reference
+blindly at save time (an interface's own IP) can still silently fail to
+resolve at actual push/deploy time without one. `internet` creates that
+parent definition automatically, at the item's own scope, with a
+placeholder value that's never actually deployed anywhere (every real
+device's value still comes from `variable_overrides`) — you don't need to
+declare it yourself.
+
+### Shared/inherited config is customized via overrides, not edited directly
+
+Built-in interfaces like `$eth-internet`/`$eth-local` are commonly already
+members of a shared zone and logical-router defined several folders up
+(e.g. at a tenant-wide "ngfw-shared"-style folder) — SCM enforces that an
+interface can only belong to one zone and one router at a time.
+`internet` never edits that shared object directly (which would apply the
+change to every device/folder that inherits from it, not just the one
+this item targets); instead, when a static WAN route is needed, it
+creates a same-named **override** at the item's own scope, layered on top
+of the shared object — the same override pattern SCM itself uses for
+things like a device-specific interface IP. Confirmed live: SCM overrides
+fully replace their corresponding entry rather than merging field-by-field,
+so the override always re-declares the full inherited interface list
+alongside the new route, or the override would silently drop routing for
+the whole VR on every device under that scope.
+
+### Why not SCM's "Internet Access Rule"
+
+SCM has a simplified `policy_type: "Internet"` security rule feature
+(PAN-OS's "Internet Access Rule"). This tool doesn't use it: every one of
+its filtering fields (`allow_web_application`, `block_web_application`,
+`allow_url_category`, `block_url_category`) is web/URL-specific, with no
+field for unrestricted (non-web) traffic — confirmed live, a client behind
+the LAN interface could browse the web but nothing else until the rule
+was switched to a standard `policy_type: "Security"` rule with
+`application`/`service`/`category` all set to `any`, which is what
+`internet` actually creates.
+
+### Example commands
+
+```sh
+# See what would change, without calling the SCM API
+pang internet -dry-run
+
+# Use the default playbook path (playbooks/internet.yml)
+pang internet
+
+# Point at a different playbook
+pang internet -playbook playbooks/other_internet.yml
+
+# Run the playbook but skip the automatic push, even if it sets push: true
+pang internet -no-push
+```
+
 ## update
 
 `update` refreshes gopangoblin in place: it downloads the current source
@@ -335,10 +487,12 @@ main.go                         CLI entrypoint and tool dispatch
 internal/tool/                  Tool registry
 internal/habuilder/             habuilder tool: playbook parsing + reconciliation
 internal/reset/                 reset tool: playbook parsing + config wipe
-internal/scm/                   Strata Cloud Manager API client (shared by habuilder and reset)
+internal/internet/              internet tool: playbook parsing + basic internet access setup
+internal/scm/                   Strata Cloud Manager API client (shared by all three)
 internal/update/                update tool: pulls source from GitHub and rebuilds
 playbooks/ha_pairs.yml          Example/working habuilder playbook
 playbooks/reset.yml             Example/working reset playbook
+playbooks/internet.yml          Example/working internet playbook
 ```
 
 ## License
