@@ -59,6 +59,66 @@ type Item struct {
 	LANCIDR          string `yaml:"lan_cidr"`
 	DNSServer        string `yaml:"dns_server"`
 
+	// TrustZone/UntrustZone name the zone each interface should belong to.
+	// Optional: left unset, they fall back to reconcile.go's
+	// trustZoneName/untrustZoneName ("trust"/"untrust") constants -- the
+	// same defaults this tool has always used. Either way, the named zone
+	// is looked up and created if missing, or the interface is merged into
+	// it if it already exists. If the interface is already a member of
+	// some OTHER zone this scope owns, it's moved. If it's already a
+	// member of a shared/inherited zone this scope doesn't own (e.g. SCM's
+	// built-in $eth-internet/$eth-local, already zoned "internet"/"local"
+	// several folders up), reassigning it fails with a clear error instead
+	// of silently doing nothing -- confirmed live: SCM enforces "one zone
+	// per interface" globally, checked against the shared zone's own
+	// definition regardless of scope-level overrides, so there's no safe
+	// way to free the interface up without editing that shared object
+	// directly (which this tool won't do -- its blast radius reaches every
+	// other folder/device that still inherits it). Give the interface
+	// field its own never-before-zoned variable instead (see
+	// Untrust02Interface's doc comment on custom variables) if you need it
+	// in a specific named zone.
+	TrustZone   string `yaml:"trust_zone"`
+	UntrustZone string `yaml:"untrust_zone"`
+
+	// Router names the logical-router this item's interfaces should be
+	// routed through. Optional: left unset, it falls back to
+	// reconcile.go's routerName ("default") constant -- the same default
+	// this tool has always used. Subject to the exact same "already routed
+	// via a shared/inherited router this scope doesn't own" limitation as
+	// TrustZone/UntrustZone above (PAN-OS only allows an interface to
+	// belong to one logical-router too).
+	Router string `yaml:"router"`
+
+	// Untrust02Interface names an optional second WAN interface (e.g. a
+	// redundant/secondary ISP uplink). Unlike TrustInterface/
+	// UntrustInterface, there's no built-in SCM template variable for a
+	// third port, so this has no required default: leaving it (and
+	// default_untrust02_interface) unset simply disables the whole
+	// secondary WAN feature for this item. A custom $variable name given
+	// here (e.g. "$eth-internet02") needs its own default_value defined
+	// somewhere -- either via this item's own var_list, or an ancestor's
+	// -- the same way SCM's built-in $eth-internet/$eth-local already are;
+	// a literal name (e.g. "ethernet1/2") is handled automatically instead
+	// (see normalizeInterfaceName). WAN02CIDR/WAN02Gateway behave like
+	// WANCIDR/WANGateway -- static when both are set, DHCP client
+	// otherwise.
+	Untrust02Interface string `yaml:"untrust02_interface"`
+	WAN02CIDR          string `yaml:"wan02_cidr"`
+	WAN02Gateway       string `yaml:"wan02_gw"`
+
+	// Untrust02Zone behaves like UntrustZone, falling back to
+	// reconcile.go's untrust02ZoneName ("untrust02") constant.
+	Untrust02Zone string `yaml:"untrust02_zone"`
+
+	// VarList defines/overrides real SCM template-variable values at this
+	// item's own scope (folder/snippet/device) -- e.g. a custom interface
+	// variable like $eth-internet02 that Untrust02Interface references,
+	// which (unlike $eth-internet/$eth-local) SCM has no built-in
+	// definition for. See VariableOverride's doc comment for how this
+	// differs from a vars.default_* playbook fallback.
+	VarList []VarItem `yaml:"var_list"`
+
 	// DHCPPool is the LAN DHCP server's address pool range (e.g.
 	// "10.0.0.128-10.0.0.254"). Optional: when unset and lan_cidr is a
 	// literal CIDR (not a $variable), it's auto-derived as the upper half
@@ -79,13 +139,33 @@ type Item struct {
 	LANGateway string `yaml:"lan_gw"`
 }
 
-// VariableOverride writes per-firewall values for SCM template variables
-// defined at a folder/snippet level (e.g. a $trust_interface variable
-// that resolves differently per device).
+// VariableOverride writes SCM template-variable values scoped to exactly
+// one of Serial, Folder, or Snippet (validated by LoadPlaybook) -- Name is
+// just a display label, like an item_list entry's. A device-scoped entry
+// is the common case (a variable that resolves differently per device,
+// e.g. $wan_cidr); folder/snippet-scoped entries are for a variable that
+// genuinely shares one real value across every device under that scope,
+// as opposed to a vars.default_* playbook-side fallback, which only
+// affects this tool's own field resolution and never actually writes an
+// SCM variable definition anyone else's config could reference.
 type VariableOverride struct {
 	Name    string    `yaml:"name"`
 	Serial  string    `yaml:"serial"`
+	Folder  string    `yaml:"folder"`
+	Snippet string    `yaml:"snippet"`
 	VarList []VarItem `yaml:"var_list"`
+}
+
+// Scope returns the (scopeParam, scopeValue) pair this override targets.
+func (vo VariableOverride) Scope() (scopeParam, scopeValue string) {
+	switch {
+	case vo.Folder != "":
+		return "folder", vo.Folder
+	case vo.Snippet != "":
+		return "snippet", vo.Snippet
+	default:
+		return "device", vo.Serial
+	}
 }
 
 // VarItem is one variable name/value pair under a VariableOverride's var_list.
@@ -148,6 +228,25 @@ type ResolvedItem struct {
 	DNSServer        string
 	DHCPPool         string // "" means auto-derive from LANCIDR if possible
 	LANGateway       string // "" means auto-derive from LANCIDR if possible
+
+	// TrustZone/UntrustZone being "" means reconcile.go's hardcoded
+	// trustZoneName/untrustZoneName fallback applies -- see
+	// Item.TrustZone.
+	TrustZone   string
+	UntrustZone string
+
+	// Router being "" means reconcile.go's hardcoded routerName fallback
+	// applies -- see Item.Router.
+	Router string
+
+	// Untrust02Interface being "" means the secondary WAN feature is
+	// disabled for this item -- see Item.Untrust02Interface.
+	Untrust02Interface string
+	WAN02CIDR          string
+	WAN02Gateway       string
+	Untrust02Zone      string
+
+	VarList []VarItem
 }
 
 // Resolve fills in defaults from vars and validates required fields.
@@ -177,6 +276,15 @@ func (it Item) Resolve(vars map[string]string) (ResolvedItem, error) {
 	if r.UntrustInterface, err = resolveField(vars, it.UntrustInterface, "default_untrust_interface"); err != nil {
 		return r, fmt.Errorf("item_list entry %q: untrust_interface: %w", it.Name, err)
 	}
+	if r.TrustZone, err = resolveOptionalField(vars, it.TrustZone, "default_trust_zone"); err != nil {
+		return r, fmt.Errorf("item_list entry %q: trust_zone: %w", it.Name, err)
+	}
+	if r.UntrustZone, err = resolveOptionalField(vars, it.UntrustZone, "default_untrust_zone"); err != nil {
+		return r, fmt.Errorf("item_list entry %q: untrust_zone: %w", it.Name, err)
+	}
+	if r.Router, err = resolveOptionalField(vars, it.Router, "default_router"); err != nil {
+		return r, fmt.Errorf("item_list entry %q: router: %w", it.Name, err)
+	}
 	// wan_cidr/wan_gw are optional, unlike the other fields: the untrust
 	// interface is DHCP client by default, and only becomes a static
 	// interface (using these two values, plus a manual default route via
@@ -201,6 +309,22 @@ func (it Item) Resolve(vars map[string]string) (ResolvedItem, error) {
 	if r.LANGateway, err = resolveOptionalField(vars, it.LANGateway, "default_lan_gw"); err != nil {
 		return r, fmt.Errorf("item_list entry %q: lan_gw: %w", it.Name, err)
 	}
+	// untrust02_interface/wan02_* fields are all optional, like
+	// wan_cidr/wan_gw: the secondary WAN feature is simply disabled for
+	// this item when untrust02_interface resolves empty.
+	if r.Untrust02Interface, err = resolveOptionalField(vars, it.Untrust02Interface, "default_untrust02_interface"); err != nil {
+		return r, fmt.Errorf("item_list entry %q: untrust02_interface: %w", it.Name, err)
+	}
+	if r.WAN02CIDR, err = resolveOptionalField(vars, it.WAN02CIDR, "default_wan02_cidr"); err != nil {
+		return r, fmt.Errorf("item_list entry %q: wan02_cidr: %w", it.Name, err)
+	}
+	if r.WAN02Gateway, err = resolveOptionalField(vars, it.WAN02Gateway, "default_wan02_gw"); err != nil {
+		return r, fmt.Errorf("item_list entry %q: wan02_gw: %w", it.Name, err)
+	}
+	if r.Untrust02Zone, err = resolveOptionalField(vars, it.Untrust02Zone, "default_untrust02_zone"); err != nil {
+		return r, fmt.Errorf("item_list entry %q: untrust02_zone: %w", it.Name, err)
+	}
+	r.VarList = it.VarList
 
 	return r, nil
 }
@@ -228,9 +352,23 @@ func LoadPlaybook(path string) (*Playbook, error) {
 		return nil, fmt.Errorf("playbook has no item_list entries")
 	}
 
+	for _, it := range pb.ItemList {
+		for _, v := range it.VarList {
+			if v.Name == "" || v.Value == "" {
+				return nil, fmt.Errorf("item_list entry %q: var_list entries require both name and value", it.Name)
+			}
+		}
+	}
+
 	for _, vo := range pb.VariableOverrides {
-		if vo.Serial == "" {
-			return nil, fmt.Errorf("variable_overrides entry %q: serial is required", vo.Name)
+		set := 0
+		for _, v := range []string{vo.Serial, vo.Folder, vo.Snippet} {
+			if v != "" {
+				set++
+			}
+		}
+		if set != 1 {
+			return nil, fmt.Errorf("variable_overrides entry %q: exactly one of serial, folder, or snippet is required", vo.Name)
 		}
 		if len(vo.VarList) == 0 {
 			return nil, fmt.Errorf("variable_overrides entry %q: var_list has no entries", vo.Name)

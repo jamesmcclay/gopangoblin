@@ -54,3 +54,11 @@ func (c *Client) UpdateSecurityRule(id string, cfg SecurityRule) (*SecurityRule,
 	}
 	return &out, nil
 }
+
+func (c *Client) GetSecurityRule(id string) (*SecurityRule, error) {
+	var out SecurityRule
+	if err := c.doJSON("GET", SecurityRulesPath+"/"+id, nil, nil, &out); err != nil {
+		return nil, err
+	}
+	return &out, nil
+}

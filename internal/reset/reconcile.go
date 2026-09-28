@@ -82,6 +82,52 @@ func (r *reconciler) reconcileSnippet(snippet scm.Snippet) error {
 	return nil
 }
 
+// reconcileGlobal wipes every tenant-global Auto VPN cluster -- the
+// "Global" folder_list entry's special case (see LoadPlaybook/Run: "Global"
+// isn't a real SCM folder, confirmed live -- most resources 400 with
+// "Folder Global doesn't exist" when queried with it). Unlike
+// wipeScopedResources, there's no ownership/inheritance check to apply: an
+// auto-vpn-clusters object carries no folder/snippet/device field at all
+// (see scm.Client.ListAll's doc comment), so every object this lists
+// genuinely belongs to the whole tenant, not some other scope's view of it.
+// Before deleting each cluster, its gateway/branch device serials are
+// marked touched, so a subsequent push actually reaches every device the
+// cluster referenced -- not just ones separately listed in fw_list.
+func (r *reconciler) reconcileGlobal() error {
+	const label = "Global"
+
+	objs, err := r.client.ListAll(scm.AutoVPNClustersPath)
+	if err != nil {
+		return fmt.Errorf("listing auto-vpn-clusters: %w", err)
+	}
+	if len(objs) == 0 {
+		fmt.Printf("  [skip]   %s already has no auto-vpn-cluster config to remove\n", label)
+		return nil
+	}
+
+	items := make([]pending, 0, len(objs))
+	for _, obj := range objs {
+		full, err := r.client.GetAutoVPNCluster(obj.ID)
+		if err != nil {
+			return fmt.Errorf("fetching auto-vpn-cluster %q: %w", obj.Name, err)
+		}
+		for _, g := range full.Gateways {
+			r.markTouched(g.Name)
+		}
+		for _, b := range full.Branches {
+			r.markTouched(b.Name)
+		}
+		items = append(items, pending{
+			resource: scm.WipeResource{Name: "auto-vpn-clusters", Path: scm.AutoVPNClustersPath},
+			id:       obj.ID,
+			name:     obj.Name,
+		})
+	}
+
+	_, err = r.deleteCandidates(items, label)
+	return err
+}
+
 // markAffectedDevices marks every device in devices as touched, so a
 // folder/snippet wipe's changes actually get pushed to whatever inherits
 // from it, not just to devices that separately had their own device-owned
@@ -107,13 +153,14 @@ func (r *reconciler) markAffectedDevices(label string, devices []scm.Device) {
 // changed reports whether anything was actually found to remove. label is
 // used only for log output.
 func (r *reconciler) wipeScopedResources(scopeParam, scopeValue, label string) (changed bool, err error) {
-	type pending struct {
-		resource scm.WipeResource
-		id       string
-		name     string
-	}
-
+	// Deduplicated by (path, id): confirmed live, a device-scoped
+	// sdwan-rules query ignores the "position" filter entirely and returns
+	// the identical full rule list for both "pre" and "post" (unlike the
+	// same resource at folder scope, where position genuinely splits the
+	// results) -- so a resource declaring both positions would otherwise
+	// list the same device-owned rule as two separate candidates.
 	var candidates []pending
+	seen := map[[2]string]bool{}
 	for _, res := range scm.WipeResources {
 		positions := res.Positions
 		if len(positions) == 0 {
@@ -125,6 +172,11 @@ func (r *reconciler) wipeScopedResources(scopeParam, scopeValue, label string) (
 				return false, fmt.Errorf("listing %s: %w", res.Name, err)
 			}
 			for _, obj := range objs {
+				key := [2]string{res.Path, obj.ID}
+				if seen[key] {
+					continue
+				}
+				seen[key] = true
 				candidates = append(candidates, pending{resource: res, id: obj.ID, name: obj.Name})
 			}
 		}
@@ -156,6 +208,25 @@ func (r *reconciler) wipeScopedResources(scopeParam, scopeValue, label string) (
 		items = append(items, c)
 	}
 
+	return r.deleteCandidates(items, label)
+}
+
+// pending is one object found to remove, shared by wipeScopedResources
+// (folder/snippet/device-scoped resources) and reconcileGlobal
+// (tenant-global ones).
+type pending struct {
+	resource scm.WipeResource
+	id       string
+	name     string
+}
+
+// deleteCandidates removes every item in items, retrying in rounds so
+// undocumented deletion-order dependencies (e.g. a rule referencing a zone)
+// resolve themselves: each round deletes everything it can, and whatever
+// still 409s moves to the next round. Returns an error only if a full round
+// makes no progress at all. changed reports whether anything was actually
+// found to remove. label is used only for log output.
+func (r *reconciler) deleteCandidates(items []pending, label string) (changed bool, err error) {
 	if len(items) == 0 {
 		return false, nil
 	}
@@ -172,6 +243,7 @@ func (r *reconciler) wipeScopedResources(scopeParam, scopeValue, label string) (
 	for len(items) > 0 {
 		var remaining []pending
 		var lastErr error
+		conflicts := map[[2]string]error{}
 		for _, it := range items {
 			if err := r.client.DeleteByID(it.resource.Path, it.id); err != nil {
 				if scm.IsNotFound(err) {
@@ -188,6 +260,7 @@ func (r *reconciler) wipeScopedResources(scopeParam, scopeValue, label string) (
 				if scm.IsConflict(err) {
 					remaining = append(remaining, it)
 					lastErr = err
+					conflicts[[2]string{it.resource.Path, it.id}] = err
 					continue
 				}
 				return false, fmt.Errorf("deleting %s %s: %w", it.resource.Name, it.id, err)
@@ -195,6 +268,15 @@ func (r *reconciler) wipeScopedResources(scopeParam, scopeValue, label string) (
 			deleted++
 		}
 		if len(remaining) == len(items) {
+			// A whole round made zero progress: this is a genuine cycle,
+			// not just an ordering issue retries can resolve on their own.
+			// Print every item's own conflict (not just lastErr) so the
+			// real dependency graph is visible instead of one arbitrary
+			// example.
+			fmt.Printf("  [stuck]  %s: %d object(s) deadlocked, none deletable this round:\n", label, len(remaining))
+			for _, it := range remaining {
+				fmt.Printf("             - %s %q (%s): %v\n", it.resource.Name, it.name, it.id, conflicts[[2]string{it.resource.Path, it.id}])
+			}
 			return false, fmt.Errorf("could not delete %d object(s), still referenced by other config: %w", len(remaining), lastErr)
 		}
 		items = remaining

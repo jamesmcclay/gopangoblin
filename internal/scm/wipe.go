@@ -36,6 +36,21 @@ var WipeResources = []WipeResource{
 	{Name: "dhcp-interfaces", Path: "/config/network/v1/dhcp-interfaces"},
 	{Name: "ethernet-interfaces", Path: "/config/network/v1/ethernet-interfaces"},
 	{Name: "logical-routers", Path: "/config/network/v1/logical-routers"},
+	// Confirmed live (the hard way): sdwan-rules DOES have a pre/post
+	// split after all, contrary to SDWANRulesPath's earlier assumption --
+	// a manually-created "catchall" rule living at position=post was
+	// invisible to a position-less list, so reset never found or deleted
+	// it, leaving it to keep referencing (and blocking deletion of) a
+	// traffic distribution profile every subsequent round.
+	{Name: "sdwan-rules", Path: SDWANRulesPath, Positions: []string{"pre", "post"}},
+	{Name: "sdwan-interface-profiles", Path: SDWANInterfaceProfilesPath},
+	{Name: "sdwan-traffic-distribution-profiles", Path: SDWANTrafficDistributionProfilesPath},
+	// link-tags is listed last: both sdwan-interface-profiles and
+	// sdwan-traffic-distribution-profiles reference a link-tags object by
+	// name, so it can only be deleted once those are gone -- deleteCandidates'
+	// round-based retry handles this regardless of list order, but ordering
+	// it last means it converges in fewer rounds.
+	{Name: "link-tags", Path: LinkTagsPath},
 }
 
 // KnownBuiltInNames lists SCM's own built-in shared template variables --
@@ -134,6 +149,39 @@ func (c *Client) ListVisible(path, scopeParam, scopeValue, position string) ([]S
 		if position != "" {
 			q.Set("position", position)
 		}
+
+		var page listScopedResponse
+		if err := c.doJSON("GET", path, q, nil, &page); err != nil {
+			return nil, fmt.Errorf("listing %s: %w", path, err)
+		}
+		all = append(all, page.Data...)
+
+		offset += len(page.Data)
+		if len(page.Data) == 0 || offset >= page.Total {
+			break
+		}
+	}
+	return all, nil
+}
+
+// ListAll returns every object at path with no folder/snippet/device query
+// param at all, paginating as needed -- for a genuinely tenant-global
+// resource that ignores scoping entirely. Confirmed live: an
+// auto-vpn-clusters query returns the identical tenant-wide list whether
+// queried with folder=Global, folder=Lab Firewalls, or no folder param at
+// all, and the object itself carries no folder/snippet/device field in
+// either its list or bare-id-GET response -- so ListByScope/ListVisible's
+// scopeParam machinery doesn't apply to it (see the "reset" tool's
+// reconcileGlobal and the "sdwan" tool's findCluster, which both hit this).
+func (c *Client) ListAll(path string) ([]ScopedObject, error) {
+	const pageSize = 200
+
+	var all []ScopedObject
+	offset := 0
+	for {
+		q := url.Values{}
+		q.Set("limit", fmt.Sprintf("%d", pageSize))
+		q.Set("offset", fmt.Sprintf("%d", offset))
 
 		var page listScopedResponse
 		if err := c.doJSON("GET", path, q, nil, &page); err != nil {

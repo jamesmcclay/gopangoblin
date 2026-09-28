@@ -1,6 +1,9 @@
 package internet
 
-import "testing"
+import (
+	"reflect"
+	"testing"
+)
 
 func TestLoadPlaybookResolvesExample(t *testing.T) {
 	pb, err := LoadPlaybook("../../playbooks/internet.yml")
@@ -17,23 +20,35 @@ func TestLoadPlaybookResolvesExample(t *testing.T) {
 	}
 
 	want := ResolvedItem{
-		Name:             "Lab Firewalls",
-		Type:             ItemFolder,
-		TrustInterface:   "$eth-local",
-		UntrustInterface: "$eth-internet",
-		WANCIDR:          "$wan_cidr",
-		WANGateway:       "$wan_gw",
-		LANCIDR:          "$lan_cidr",
-		DNSServer:        "8.8.8.8",
-		DHCPPool:         "$lan_pool",
-		LANGateway:       "$lan_gw",
+		Name:               "Lab Firewalls",
+		Type:               ItemFolder,
+		TrustInterface:     "$eth-lan01",
+		UntrustInterface:   "$eth-wan01",
+		WANCIDR:            "$wan_cidr",
+		WANGateway:         "$wan_gw",
+		LANCIDR:            "$lan_cidr",
+		DNSServer:          "8.8.8.8",
+		DHCPPool:           "$lan_pool",
+		LANGateway:         "$lan_gw",
+		TrustZone:          "zone-internal",
+		UntrustZone:        "zone-internet",
+		Router:             "scm_router",
+		Untrust02Interface: "$eth-wan02",
+		WAN02CIDR:          "$wan02_cidr",
+		WAN02Gateway:       "$wan02_gw",
+		Untrust02Zone:      "zone-internet",
+		VarList: []VarItem{
+			{Name: "$eth-wan01", Value: "ethernet1/2"},
+			{Name: "$eth-wan02", Value: "ethernet1/3"},
+			{Name: "$eth-lan01", Value: "ethernet1/4"},
+		},
 	}
-	if items[0] != want {
+	if !reflect.DeepEqual(items[0], want) {
 		t.Fatalf("resolved item mismatch:\n got: %+v\nwant: %+v", items[0], want)
 	}
 
-	if len(pb.VariableOverrides) != 2 {
-		t.Fatalf("expected 2 variable_overrides entries, got %d", len(pb.VariableOverrides))
+	if len(pb.VariableOverrides) != 3 {
+		t.Fatalf("expected 3 variable_overrides entries, got %d", len(pb.VariableOverrides))
 	}
 }
 

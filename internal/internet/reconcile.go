@@ -2,6 +2,7 @@ package internet
 
 import (
 	"fmt"
+	"regexp"
 	"strings"
 
 	"github.com/jamesmcclay/gopangoblin/internal/scm"
@@ -20,7 +21,85 @@ const (
 	vrfName          = "default"
 	natRuleName      = "gopangoblin-internet-nat"
 	securityRuleName = "gopangoblin-internet-access"
+	defaultRouteName = "gopangoblin-default-route"
+
+	// untrust02ZoneName/natRuleName02/defaultRouteName02 are the analogous
+	// names used for an item's optional second WAN interface (see
+	// ResolvedItem.Untrust02Interface). Unlike the primary NAT rule, wan02 gets
+	// its own separate NAT rule rather than sharing natRuleName's: a
+	// dynamic-ip-and-port source translation is tied to one specific
+	// egress interface, so two WAN interfaces can't share one rule.
+	// The security rule IS shared -- its To list simply gains
+	// untrust02ZoneName alongside untrustZoneName -- since both are just
+	// "allow trust to reach the internet" regardless of egress path.
+	untrust02ZoneName  = "untrust02"
+	natRuleName02      = "gopangoblin-internet-nat-wan02"
+	defaultRouteName02 = "gopangoblin-default-route-wan02"
+
+	// primaryRouteMetric/secondaryRouteMetric: PAN-OS's default static
+	// route metric is 10, and it rejects two routes to the same
+	// destination (0.0.0.0/0 here) sharing one metric outright ("...is
+	// not unique among static routes to destination 0.0.0.0/0") --
+	// confirmed live once a secondary WAN's default route was added
+	// alongside the primary's. secondaryRouteMetric is deliberately
+	// higher (a backup path, used only if the primary is down) rather
+	// than equal (which would need PAN-OS ECMP explicitly enabled on the
+	// logical router to be meaningful, which this tool doesn't manage).
+	primaryRouteMetric   = 10
+	secondaryRouteMetric = 20
 )
+
+// isStaticWAN reports whether a WAN interface should be configured with a
+// static IP (both cidr and gateway set) rather than as a DHCP client.
+func isStaticWAN(cidr, gateway string) bool {
+	return cidr != "" && gateway != ""
+}
+
+// resolveConfiguredName returns configured if the playbook set it
+// explicitly (e.g. it.TrustZone, it.Router), otherwise reconcile.go's
+// hardcoded fallback -- explicit reports which case applied, since
+// ensureInterfaceZoned/ensureInterfaceRouted treat them differently.
+func resolveConfiguredName(configured, fallback string) (name string, explicit bool) {
+	if configured != "" {
+		return configured, true
+	}
+	return fallback, false
+}
+
+// syntheticInterfaceVarPrefix marks a "$variable" name normalizeInterfaceName
+// invents on behalf of a literal interface name -- see its doc comment.
+const syntheticInterfaceVarPrefix = "$gopangoblin-iface-"
+
+// normalizeInterfaceName returns the name SCM's ethernet-interfaces "name"
+// field should actually use for name at this scope. Confirmed live: a
+// literal interface name (e.g. "ethernet1/2") is only valid at device
+// scope -- at folder/snippet scope SCM rejects it outright
+// ("INVALID_STRING_REGEX", even for an interface name already in live use
+// elsewhere at device scope) and requires a "$variable" reference instead,
+// regardless of whether every device under that scope actually shares the
+// same literal port. So a literal name given for a folder/snippet-scoped
+// item (e.g. a playbook's untrust02_interface: "ethernet1/2") is
+// transparently wrapped in a synthetic variable unique to that literal
+// (reversible via syntheticInterfaceLiteral), which installEthernetInterface gives a
+// matching default_value the first time it's created there -- the same
+// default_value indirection mechanism SCM's own built-in
+// $eth-internet/$eth-local use for exactly this reason.
+func normalizeInterfaceName(scopeParam, name string) string {
+	if scopeParam == "device" || strings.HasPrefix(name, "$") {
+		return name
+	}
+	return syntheticInterfaceVarPrefix + strings.ReplaceAll(name, "/", "-")
+}
+
+// syntheticInterfaceLiteral reverses normalizeInterfaceName: if name is one
+// of its synthetic variables, returns the original literal interface name
+// and true; otherwise "", false.
+func syntheticInterfaceLiteral(name string) (string, bool) {
+	if !strings.HasPrefix(name, syntheticInterfaceVarPrefix) {
+		return "", false
+	}
+	return strings.ReplaceAll(strings.TrimPrefix(name, syntheticInterfaceVarPrefix), "-", "/"), true
+}
 
 type reconciler struct {
 	client  *scm.Client
@@ -125,8 +204,17 @@ func removeString(list []string, value string) []string {
 	return out
 }
 
-// reconcileItem is the entry point for one item_list entry.
+// reconcileItem is the entry point for one item_list entry. It normalizes
+// any literal interface names to SCM's required form before dispatching
+// (see normalizeInterfaceName) -- every downstream function operates on
+// the normalized ResolvedItem.
 func (r *reconciler) reconcileItem(scopeParam, scopeValue, label string, it ResolvedItem) error {
+	it.TrustInterface = normalizeInterfaceName(scopeParam, it.TrustInterface)
+	it.UntrustInterface = normalizeInterfaceName(scopeParam, it.UntrustInterface)
+	if it.Untrust02Interface != "" {
+		it.Untrust02Interface = normalizeInterfaceName(scopeParam, it.Untrust02Interface)
+	}
+
 	if r.mode == ModeUninstall {
 		return r.uninstallItem(scopeParam, scopeValue, label, it)
 	}
@@ -156,7 +244,19 @@ func (r *reconciler) reconcileItem(scopeParam, scopeValue, label string, it Reso
 // so proceeding to installItem whenever any piece is missing is safe:
 // pieces that already match are simply left as a harmless no-op update.
 func (r *reconciler) itemFullyConfigured(scopeParam, scopeValue string, it ResolvedItem) (bool, error) {
-	staticWAN := it.WANCIDR != "" && it.WANGateway != ""
+	staticWAN := isStaticWAN(it.WANCIDR, it.WANGateway)
+	hasWAN02 := it.Untrust02Interface != ""
+	staticWAN02 := isStaticWAN(it.WAN02CIDR, it.WAN02Gateway)
+
+	for _, item := range it.VarList {
+		ok, err := r.varListItemSatisfied(scopeParam, scopeValue, item)
+		if err != nil {
+			return false, err
+		}
+		if !ok {
+			return false, nil
+		}
+	}
 
 	ownedChecks := []struct {
 		path string
@@ -169,6 +269,20 @@ func (r *reconciler) itemFullyConfigured(scopeParam, scopeValue string, it Resol
 		{scm.NATRulesPath, natRuleName, "pre"},
 		{scm.SecurityRulesPath, securityRuleName, "pre"},
 	}
+	if hasWAN02 {
+		ownedChecks = append(ownedChecks,
+			struct {
+				path string
+				name string
+				pos  string
+			}{scm.EthernetInterfacesPath, it.Untrust02Interface, ""},
+			struct {
+				path string
+				name string
+				pos  string
+			}{scm.NATRulesPath, natRuleName02, "pre"},
+		)
+	}
 	for _, c := range ownedChecks {
 		obj, err := r.findOwned(c.path, scopeParam, scopeValue, c.name, c.pos)
 		if err != nil {
@@ -179,20 +293,45 @@ func (r *reconciler) itemFullyConfigured(scopeParam, scopeValue string, it Resol
 		}
 	}
 
-	for _, iface := range []string{it.TrustInterface, it.UntrustInterface} {
-		zone, err := r.findZoneWithInterface(scopeParam, scopeValue, iface)
+	trustZoneTarget, trustExplicit := resolveConfiguredName(it.TrustZone, trustZoneName)
+	untrustZoneTarget, untrustExplicit := resolveConfiguredName(it.UntrustZone, untrustZoneName)
+	zoneChecks := []struct {
+		iface    string
+		target   string
+		explicit bool
+	}{
+		{it.TrustInterface, trustZoneTarget, trustExplicit},
+		{it.UntrustInterface, untrustZoneTarget, untrustExplicit},
+	}
+	if hasWAN02 {
+		untrust02ZoneTarget, untrust02Explicit := resolveConfiguredName(it.Untrust02Zone, untrust02ZoneName)
+		zoneChecks = append(zoneChecks, struct {
+			iface    string
+			target   string
+			explicit bool
+		}{it.Untrust02Interface, untrust02ZoneTarget, untrust02Explicit})
+	}
+	routerTarget, routerExplicit := resolveConfiguredName(it.Router, routerName)
+	for _, c := range zoneChecks {
+		zone, err := r.findZoneWithInterface(scopeParam, scopeValue, c.iface)
 		if err != nil {
 			return false, err
 		}
 		if zone == nil {
 			return false, nil
 		}
+		if c.explicit && zone.Name != c.target {
+			return false, nil
+		}
 
-		router, err := r.findRouterWithInterface(scopeParam, scopeValue, iface)
+		router, err := r.findRouterWithInterface(scopeParam, scopeValue, c.iface)
 		if err != nil {
 			return false, err
 		}
 		if router == nil {
+			return false, nil
+		}
+		if routerExplicit && router.Name != routerTarget {
 			return false, nil
 		}
 	}
@@ -203,12 +342,52 @@ func (r *reconciler) itemFullyConfigured(scopeParam, scopeValue string, it Resol
 			return false, err
 		}
 		vrf := vrfContaining(router.VRF, it.UntrustInterface)
-		if vrf == nil || vrf.RoutingTable == nil || vrf.RoutingTable.IP == nil || !hasStaticRoute(vrf.RoutingTable.IP.StaticRoute, "gopangoblin-default-route") {
+		if vrf == nil || vrf.RoutingTable == nil || vrf.RoutingTable.IP == nil || !hasStaticRoute(vrf.RoutingTable.IP.StaticRoute, defaultRouteName) {
+			return false, nil
+		}
+	}
+	if hasWAN02 && staticWAN02 {
+		router, err := r.findRouterWithInterface(scopeParam, scopeValue, it.Untrust02Interface)
+		if err != nil {
+			return false, err
+		}
+		vrf := vrfContaining(router.VRF, it.Untrust02Interface)
+		if vrf == nil || vrf.RoutingTable == nil || vrf.RoutingTable.IP == nil || !hasStaticRoute(vrf.RoutingTable.IP.StaticRoute, defaultRouteName02) {
+			return false, nil
+		}
+	}
+
+	if hasWAN02 {
+		zone, err := r.findZoneWithInterface(scopeParam, scopeValue, it.Untrust02Interface)
+		if err != nil {
+			return false, err
+		}
+		secRuleObj, err := r.findOwned(scm.SecurityRulesPath, scopeParam, scopeValue, securityRuleName, "pre")
+		if err != nil {
+			return false, err
+		}
+		if secRuleObj == nil {
+			return false, nil
+		}
+		full, err := r.client.GetSecurityRule(secRuleObj.ID)
+		if err != nil {
+			return false, err
+		}
+		if zone == nil || !containsString(full.To, zone.Name) {
 			return false, nil
 		}
 	}
 
 	return true, nil
+}
+
+func containsString(list []string, value string) bool {
+	for _, v := range list {
+		if v == value {
+			return true
+		}
+	}
+	return false
 }
 
 func hasStaticRoute(routes []scm.LogicalRouterStaticRoute, name string) bool {
@@ -222,9 +401,19 @@ func hasStaticRoute(routes []scm.LogicalRouterStaticRoute, name string) bool {
 
 func (r *reconciler) installItem(scopeParam, scopeValue, label string, it ResolvedItem) error {
 	folder, snippet, device := scopeFields(scopeParam, scopeValue)
-	staticWAN := it.WANCIDR != "" && it.WANGateway != ""
+	staticWAN := isStaticWAN(it.WANCIDR, it.WANGateway)
+	hasWAN02 := it.Untrust02Interface != ""
+	staticWAN02 := isStaticWAN(it.WAN02CIDR, it.WAN02Gateway)
 
-	for _, v := range []string{it.LANCIDR, it.WANCIDR, it.WANGateway, it.DNSServer, it.DHCPPool, it.LANGateway} {
+	if _, err := r.reconcileVarList(scopeParam, scopeValue, label, it.VarList); err != nil {
+		return fmt.Errorf("var_list: %w", err)
+	}
+
+	varsToDefine := []string{it.LANCIDR, it.WANCIDR, it.WANGateway, it.DNSServer, it.DHCPPool, it.LANGateway}
+	if hasWAN02 {
+		varsToDefine = append(varsToDefine, it.WAN02CIDR, it.WAN02Gateway)
+	}
+	for _, v := range varsToDefine {
 		if err := r.ensureVariableDefined(scopeParam, scopeValue, folder, snippet, device, v); err != nil {
 			return fmt.Errorf("defining variable %s: %w", v, err)
 		}
@@ -252,16 +441,41 @@ func (r *reconciler) installItem(scopeParam, scopeValue, label string, it Resolv
 		return fmt.Errorf("untrust interface: %w", err)
 	}
 
-	trustZone, err := r.ensureInterfaceZoned(scopeParam, scopeValue, folder, snippet, device, it.TrustInterface, trustZoneName)
+	trustZoneTarget, trustExplicit := resolveConfiguredName(it.TrustZone, trustZoneName)
+	trustZone, err := r.ensureInterfaceZoned(scopeParam, scopeValue, folder, snippet, device, it.TrustInterface, trustZoneTarget, trustExplicit)
 	if err != nil {
 		return fmt.Errorf("trust zone: %w", err)
 	}
-	untrustZone, err := r.ensureInterfaceZoned(scopeParam, scopeValue, folder, snippet, device, it.UntrustInterface, untrustZoneName)
+	untrustZoneTarget, untrustExplicit := resolveConfiguredName(it.UntrustZone, untrustZoneName)
+	untrustZone, err := r.ensureInterfaceZoned(scopeParam, scopeValue, folder, snippet, device, it.UntrustInterface, untrustZoneTarget, untrustExplicit)
 	if err != nil {
 		return fmt.Errorf("untrust zone: %w", err)
 	}
 
-	if err := r.installRouter(scopeParam, scopeValue, folder, snippet, device, it, staticWAN); err != nil {
+	var untrustZone02 string
+	if hasWAN02 {
+		var wan02Layer3 scm.EthernetInterfaceLayer3
+		if staticWAN02 {
+			wan02Layer3 = scm.EthernetInterfaceLayer3{
+				IP: []scm.EthernetInterfaceStaticIP{{Name: it.WAN02CIDR}},
+			}
+		} else {
+			enable, createRoute := true, true
+			wan02Layer3 = scm.EthernetInterfaceLayer3{
+				DHCPClient: &scm.EthernetInterfaceDHCPClient{Enable: &enable, CreateDefaultRoute: &createRoute},
+			}
+		}
+		if err := r.installEthernetInterface(scopeParam, scopeValue, folder, snippet, device, it.Untrust02Interface, wan02Layer3); err != nil {
+			return fmt.Errorf("secondary WAN interface: %w", err)
+		}
+		untrust02ZoneTarget, untrust02Explicit := resolveConfiguredName(it.Untrust02Zone, untrust02ZoneName)
+		untrustZone02, err = r.ensureInterfaceZoned(scopeParam, scopeValue, folder, snippet, device, it.Untrust02Interface, untrust02ZoneTarget, untrust02Explicit)
+		if err != nil {
+			return fmt.Errorf("secondary WAN zone: %w", err)
+		}
+	}
+
+	if err := r.installRouter(scopeParam, scopeValue, folder, snippet, device, it, staticWAN, staticWAN02); err != nil {
 		return fmt.Errorf("logical router: %w", err)
 	}
 
@@ -269,11 +483,20 @@ func (r *reconciler) installItem(scopeParam, scopeValue, label string, it Resolv
 		return fmt.Errorf("DHCP server: %w", err)
 	}
 
-	if err := r.installNAT(scopeParam, scopeValue, folder, snippet, device, it, trustZone, untrustZone); err != nil {
+	if err := r.installNAT(scopeParam, scopeValue, folder, snippet, device, natRuleName, trustZone, untrustZone, it.UntrustInterface); err != nil {
 		return fmt.Errorf("NAT rule: %w", err)
 	}
+	if hasWAN02 {
+		if err := r.installNAT(scopeParam, scopeValue, folder, snippet, device, natRuleName02, trustZone, untrustZone02, it.Untrust02Interface); err != nil {
+			return fmt.Errorf("secondary WAN NAT rule: %w", err)
+		}
+	}
 
-	if err := r.installSecurityRule(scopeParam, scopeValue, folder, snippet, device, trustZone, untrustZone); err != nil {
+	toZones := []string{untrustZone}
+	if hasWAN02 {
+		toZones = append(toZones, untrustZone02)
+	}
+	if err := r.installSecurityRule(scopeParam, scopeValue, folder, snippet, device, trustZone, toZones); err != nil {
 		return fmt.Errorf("security rule: %w", err)
 	}
 
@@ -313,6 +536,14 @@ func (r *reconciler) installEthernetInterface(scopeParam, scopeValue, folder, sn
 	if err != nil {
 		return err
 	}
+	if defaultValue == "" {
+		// A genuinely new synthetic variable (see normalizeInterfaceName)
+		// has no ancestor definition to inherit -- give it its own,
+		// pointing at the literal interface it stands in for.
+		if literal, ok := syntheticInterfaceLiteral(name); ok {
+			defaultValue = literal
+		}
+	}
 	target.DefaultValue = defaultValue
 
 	if r.dryRun {
@@ -346,44 +577,84 @@ func (r *reconciler) findInterfaceDefaultValue(scopeParam, scopeValue, name stri
 	return "", nil
 }
 
-// ensureInterfaceZoned makes sure ifaceName is a member of some zone
-// visible from this scope, and returns that zone's actual name. Confirmed
-// live: SCM's built-in $eth-local/$eth-internet are already members of
-// shared zones literally named "local"/"internet" (not "trust"/
-// "untrust") several folders up, and PAN-OS enforces that an interface
-// can only belong to one zone -- so if it's already zoned anywhere, that
-// zone's real name is returned unchanged and nothing is modified.
-// Otherwise ifaceName is added to a zone named preferredName, owned at
-// this exact scope (created if needed), and preferredName is returned.
-// The returned name is what NAT/security rules should use for
-// from/to -- never assume it's preferredName.
-func (r *reconciler) ensureInterfaceZoned(scopeParam, scopeValue, folder, snippet, device, ifaceName, preferredName string) (string, error) {
+// ensureInterfaceZoned makes sure ifaceName ends up a member of the zone
+// named zoneName, scoped at (scopeParam, scopeValue) -- creating that zone
+// (owned at this exact scope) if it doesn't already exist, or merging
+// ifaceName into it if it does -- and returns zoneName. explicit
+// distinguishes two callers:
+//
+//   - explicit=false (zoneName is reconcile.go's hardcoded fallback, e.g.
+//     trustZoneName, because the playbook left trust_zone/etc. unset):
+//     preserves this tool's original behavior of never disturbing an
+//     interface that's already zoned anywhere else. Confirmed live: SCM's
+//     built-in $eth-local/$eth-internet are already members of shared
+//     zones literally named "local"/"internet" (not "trust"/"untrust")
+//     several folders up -- if ifaceName is already zoned anywhere, that
+//     existing zone's real name is returned unchanged and nothing is
+//     modified, rather than also cramming it into zoneName too.
+//   - explicit=true (the playbook set trust_zone/untrust_zone/
+//     untrust02_zone explicitly): zoneName is authoritative. If ifaceName
+//     is zoned elsewhere and this scope owns that other zone, it's moved
+//     (removed from the old zone, added to zoneName). If it's a
+//     shared/inherited zone this scope doesn't own (e.g. the built-in
+//     "internet"/"local" case above), this returns an error instead of
+//     silently doing nothing: confirmed live, SCM enforces "one zone per
+//     interface" globally against the shared zone's own definition
+//     regardless of scope-level overrides -- creating a same-named
+//     override here with ifaceName removed (mirroring the override
+//     pattern that works fine for logical-routers) does NOT actually free
+//     ifaceName up, so there is no safe way to complete this reassignment
+//     without editing the shared object directly, which this tool won't
+//     do (its blast radius reaches every other folder/device that still
+//     inherits it).
+//
+// PAN-OS only allows an interface to belong to one zone, so explicit=true
+// callers are responsible for the whole point of this field: actually
+// moving an interface off SCM's default built-in zoning onto a
+// user-chosen name -- which only works for an interface that isn't
+// already zoned via a shared ancestor to begin with.
+func (r *reconciler) ensureInterfaceZoned(scopeParam, scopeValue, folder, snippet, device, ifaceName, zoneName string, explicit bool) (string, error) {
 	found, err := r.findZoneWithInterface(scopeParam, scopeValue, ifaceName)
 	if err != nil {
 		return "", err
 	}
 	if found != nil {
-		return found.Name, nil
+		if !explicit || found.Name == zoneName {
+			return found.Name, nil
+		}
+		owned, _, err := r.client.IsScopedTo(scm.ZonesPath, found.ID, scopeParam, scopeValue)
+		if err != nil {
+			return "", err
+		}
+		if !owned {
+			return "", fmt.Errorf("interface %q is already zoned %q (inherited, not owned at this scope) and can't be moved to %q -- this tool won't edit a shared zone directly, since that affects every other folder/device that still inherits it; give this interface a variable that isn't already zoned instead", ifaceName, found.Name, zoneName)
+		}
+		if r.dryRun {
+			return zoneName, nil
+		}
+		if err := r.removeInterfaceFromZone(scopeParam, scopeValue, found.Name, ifaceName, new(bool)); err != nil {
+			return "", err
+		}
 	}
 
-	existing, err := r.findOwned(scm.ZonesPath, scopeParam, scopeValue, preferredName, "")
+	existing, err := r.findOwned(scm.ZonesPath, scopeParam, scopeValue, zoneName, "")
 	if err != nil {
 		return "", err
 	}
 
 	if existing == nil {
 		if r.dryRun {
-			return preferredName, nil
+			return zoneName, nil
 		}
-		target := scm.Zone{Name: preferredName, Folder: folder, Snippet: snippet, Device: device, Network: scm.ZoneNetwork{Layer3: []string{ifaceName}}}
+		target := scm.Zone{Name: zoneName, Folder: folder, Snippet: snippet, Device: device, Network: scm.ZoneNetwork{Layer3: []string{ifaceName}}}
 		if _, err := r.client.CreateZone(target); err != nil {
 			return "", err
 		}
-		return preferredName, nil
+		return zoneName, nil
 	}
 
 	if r.dryRun {
-		return preferredName, nil
+		return zoneName, nil
 	}
 	full, err := r.client.GetZone(existing.ID)
 	if err != nil {
@@ -393,7 +664,7 @@ func (r *reconciler) ensureInterfaceZoned(scopeParam, scopeValue, folder, snippe
 	if _, err := r.client.UpdateZone(full.ID, *full); err != nil {
 		return "", err
 	}
-	return preferredName, nil
+	return zoneName, nil
 }
 
 // findZoneWithInterface searches every zone visible from this scope
@@ -434,18 +705,32 @@ func findVRF(vrfs []scm.VRF, name string) *scm.VRF {
 // $eth-local/$eth-internet are commonly already members of a shared
 // "default" logical-router several folders up (e.g. at "ngfw-shared"),
 // and PAN-OS enforces that an interface can only belong to one router.
-func (r *reconciler) installRouter(scopeParam, scopeValue, folder, snippet, device string, it ResolvedItem, staticWAN bool) error {
-	if err := r.ensureInterfaceRouted(scopeParam, scopeValue, folder, snippet, device, it.TrustInterface); err != nil {
+func (r *reconciler) installRouter(scopeParam, scopeValue, folder, snippet, device string, it ResolvedItem, staticWAN, staticWAN02 bool) error {
+	routerTarget, routerExplicit := resolveConfiguredName(it.Router, routerName)
+	if err := r.ensureInterfaceRouted(scopeParam, scopeValue, folder, snippet, device, it.TrustInterface, routerTarget, routerExplicit); err != nil {
 		return fmt.Errorf("trust interface: %w", err)
 	}
-	if err := r.ensureInterfaceRouted(scopeParam, scopeValue, folder, snippet, device, it.UntrustInterface); err != nil {
+	if err := r.ensureInterfaceRouted(scopeParam, scopeValue, folder, snippet, device, it.UntrustInterface, routerTarget, routerExplicit); err != nil {
 		return fmt.Errorf("untrust interface: %w", err)
 	}
+	if staticWAN {
+		if err := r.ensureDefaultRoute(scopeParam, scopeValue, folder, snippet, device, it.UntrustInterface, it.WANGateway, defaultRouteName, primaryRouteMetric); err != nil {
+			return err
+		}
+	}
 
-	if !staticWAN {
+	if it.Untrust02Interface == "" {
 		return nil
 	}
-	return r.ensureDefaultRoute(scopeParam, scopeValue, folder, snippet, device, it)
+	if err := r.ensureInterfaceRouted(scopeParam, scopeValue, folder, snippet, device, it.Untrust02Interface, routerTarget, routerExplicit); err != nil {
+		return fmt.Errorf("secondary WAN interface: %w", err)
+	}
+	if staticWAN02 {
+		if err := r.ensureDefaultRoute(scopeParam, scopeValue, folder, snippet, device, it.Untrust02Interface, it.WAN02Gateway, defaultRouteName02, secondaryRouteMetric); err != nil {
+			return fmt.Errorf("secondary WAN interface: %w", err)
+		}
+	}
+	return nil
 }
 
 // findRouterWithInterface searches every logical-router visible from
@@ -480,27 +765,64 @@ func vrfContaining(vrfs []scm.VRF, ifaceName string) *scm.VRF {
 	return nil
 }
 
-// ensureInterfaceRouted makes sure ifaceName is a VRF member of some
-// logical-router visible from this scope. If it's already routed
-// anywhere (e.g. a shared ancestor router), nothing is changed. Otherwise
-// it's added to a "default" router owned at this exact scope, created if
-// needed.
-func (r *reconciler) ensureInterfaceRouted(scopeParam, scopeValue, folder, snippet, device, ifaceName string) error {
+// ensureInterfaceRouted makes sure ifaceName ends up a VRF member of the
+// logical-router named routerTarget, scoped at (scopeParam, scopeValue),
+// creating it (owned at this exact scope) if it doesn't exist or merging
+// ifaceName into it if it does. explicit distinguishes two callers,
+// exactly mirroring ensureInterfaceZoned's TrustZone/UntrustZone
+// semantics (see its doc comment) for the same underlying PAN-OS
+// constraint (an interface belongs to only one logical-router):
+//
+//   - explicit=false (routerTarget is reconcile.go's hardcoded fallback,
+//     because the playbook left router unset): if ifaceName is already
+//     routed anywhere (e.g. a shared ancestor router), nothing is
+//     modified.
+//   - explicit=true (the playbook set router explicitly): routerTarget is
+//     authoritative. If ifaceName is routed elsewhere and this scope owns
+//     that other router, it's moved. If it's a shared/inherited router
+//     this scope doesn't own, this returns an error rather than silently
+//     doing nothing or attempting an override this tool has confirmed (for
+//     the zones case) doesn't actually work -- SCM validates "one
+//     logical-router per interface" against the shared router's own
+//     definition regardless of scope-level overrides.
+func (r *reconciler) ensureInterfaceRouted(scopeParam, scopeValue, folder, snippet, device, ifaceName, routerTarget string, explicit bool) error {
 	found, err := r.findRouterWithInterface(scopeParam, scopeValue, ifaceName)
 	if err != nil {
 		return err
 	}
 	if found != nil {
-		return nil
+		if !explicit || found.Name == routerTarget {
+			return nil
+		}
+		owned, _, err := r.client.IsScopedTo(scm.LogicalRoutersPath, found.ID, scopeParam, scopeValue)
+		if err != nil {
+			return err
+		}
+		if !owned {
+			return fmt.Errorf("interface %q is already routed via %q (inherited, not owned at this scope) and can't be moved to %q -- this tool won't edit a shared logical-router directly, since that affects every other folder/device that still inherits it; give this interface a variable that isn't already routed instead", ifaceName, found.Name, routerTarget)
+		}
+		if r.dryRun {
+			return nil
+		}
+		full, err := r.client.GetLogicalRouter(found.ID)
+		if err != nil {
+			return err
+		}
+		if vrf := findVRF(full.VRF, vrfName); vrf != nil {
+			vrf.Interface = removeString(vrf.Interface, ifaceName)
+			if _, err := r.client.UpdateLogicalRouter(full.ID, *full); err != nil {
+				return err
+			}
+		}
 	}
 
-	existing, err := r.findOwned(scm.LogicalRoutersPath, scopeParam, scopeValue, routerName, "")
+	existing, err := r.findOwned(scm.LogicalRoutersPath, scopeParam, scopeValue, routerTarget, "")
 	if err != nil {
 		return err
 	}
 	var target scm.LogicalRouter
 	if existing == nil {
-		target = scm.LogicalRouter{Name: routerName, Folder: folder, Snippet: snippet, Device: device}
+		target = scm.LogicalRouter{Name: routerTarget, Folder: folder, Snippet: snippet, Device: device}
 	} else {
 		full, err := r.client.GetLogicalRouter(existing.ID)
 		if err != nil {
@@ -527,13 +849,16 @@ func (r *reconciler) ensureInterfaceRouted(scopeParam, scopeValue, folder, snipp
 	return err
 }
 
-// ensureDefaultRoute adds (or updates) a static default route via
-// it.WANGateway, scoped as an override at (scopeParam, scopeValue) of
-// whichever router the untrust interface is actually routed through --
-// which is commonly a shared ancestor router (e.g. SCM's built-in
-// "default" several folders up). That's fine: the nexthop is itself a
-// per-device "$variable" in the common case, so an override at our own
-// scope still resolves correctly per device.
+// ensureDefaultRoute adds (or updates) a static default route named
+// routeName, via gateway, for ifaceName, scoped as an override at
+// (scopeParam, scopeValue) of whichever router ifaceName is actually
+// routed through -- which is commonly a shared ancestor router (e.g. SCM's
+// built-in "default" several folders up). That's fine: the nexthop is
+// itself a per-device "$variable" in the common case, so an override at
+// our own scope still resolves correctly per device. Called once for the
+// primary WAN (ifaceName=UntrustInterface) and, if configured, again for
+// the optional secondary WAN (ifaceName=Untrust02Interface, a distinct
+// routeName so both can coexist).
 //
 // Confirmed live: this must be a genuine override at (scopeParam,
 // scopeValue) -- same router Name, our own folder/snippet/device -- NOT
@@ -548,15 +873,15 @@ func (r *reconciler) ensureInterfaceRouted(scopeParam, scopeValue, folder, snipp
 // membership for every device under this scope (confirmed live: this
 // exact mistake produced a real PAN-OS commit failure, "Interface ...
 // has no logical-router configured").
-func (r *reconciler) ensureDefaultRoute(scopeParam, scopeValue, folder, snippet, device string, it ResolvedItem) error {
-	source, err := r.findRouterWithInterface(scopeParam, scopeValue, it.UntrustInterface)
+func (r *reconciler) ensureDefaultRoute(scopeParam, scopeValue, folder, snippet, device, ifaceName, gateway, routeName string, metric int) error {
+	source, err := r.findRouterWithInterface(scopeParam, scopeValue, ifaceName)
 	if err != nil {
 		return err
 	}
 	if source == nil {
-		return fmt.Errorf("internal error: untrust interface %q should already be routed", it.UntrustInterface)
+		return fmt.Errorf("internal error: interface %q should already be routed", ifaceName)
 	}
-	sourceVRF := vrfContaining(source.VRF, it.UntrustInterface)
+	sourceVRF := vrfContaining(source.VRF, ifaceName)
 
 	existing, err := r.findOwned(scm.LogicalRoutersPath, scopeParam, scopeValue, source.Name, "")
 	if err != nil {
@@ -582,10 +907,11 @@ func (r *reconciler) ensureDefaultRoute(scopeParam, scopeValue, folder, snippet,
 	vrf.Interface = sourceVRF.Interface
 
 	route := scm.LogicalRouterStaticRoute{
-		Name:        "gopangoblin-default-route",
+		Name:        routeName,
 		Destination: "0.0.0.0/0",
-		Interface:   it.UntrustInterface,
-		Nexthop:     scm.LogicalRouterNexthop{IPAddress: it.WANGateway},
+		Interface:   ifaceName,
+		Nexthop:     scm.LogicalRouterNexthop{IPAddress: gateway},
+		Metric:      metric,
 	}
 	if vrf.RoutingTable == nil {
 		vrf.RoutingTable = &scm.LogicalRouterRoutingTable{}
@@ -694,9 +1020,17 @@ func (r *reconciler) installDHCP(scopeParam, scopeValue, folder, snippet, device
 	return err
 }
 
-func (r *reconciler) installNAT(scopeParam, scopeValue, folder, snippet, device string, it ResolvedItem, trustZone, untrustZone string) error {
+// installNAT creates or updates a dynamic-ip-and-port SNAT rule named name,
+// translating trustZone->untrustZone traffic to egressInterface's own
+// address. Called once for the primary WAN (name=natRuleName,
+// egressInterface=UntrustInterface) and, if configured, again for the
+// optional secondary WAN (name=natRuleName02, egressInterface=
+// Untrust02Interface, its own untrustZone02) -- a dynamic-ip-and-port
+// translation is tied to one specific interface, so the two WANs can't
+// share a single rule the way the security rule's To list can.
+func (r *reconciler) installNAT(scopeParam, scopeValue, folder, snippet, device, name, trustZone, untrustZone, egressInterface string) error {
 	target := scm.NATRule{
-		Name:        natRuleName,
+		Name:        name,
 		Folder:      folder,
 		Snippet:     snippet,
 		Device:      device,
@@ -707,12 +1041,12 @@ func (r *reconciler) installNAT(scopeParam, scopeValue, folder, snippet, device 
 		Service:     "any",
 		SourceTranslation: &scm.NATRuleSourceTranslation{
 			DynamicIPAndPort: &scm.NATRuleDynamicIPAndPort{
-				InterfaceAddress: &scm.NATRuleInterfaceAddress{Interface: it.UntrustInterface},
+				InterfaceAddress: &scm.NATRuleInterfaceAddress{Interface: egressInterface},
 			},
 		},
 	}
 
-	existing, err := r.findOwned(scm.NATRulesPath, scopeParam, scopeValue, natRuleName, "pre")
+	existing, err := r.findOwned(scm.NATRulesPath, scopeParam, scopeValue, name, "pre")
 	if err != nil {
 		return err
 	}
@@ -728,20 +1062,23 @@ func (r *reconciler) installNAT(scopeParam, scopeValue, folder, snippet, device 
 }
 
 // installSecurityRule creates a standard Security-type rule allowing all
-// traffic from the trust zone to the untrust zone. See scm.SecurityRule's
-// doc comment for why this is a standard rule (application/service/
-// category all "any") rather than SCM's simplified "Internet Access
-// Rule" (policy_type: "Internet") feature -- that type turned out to be
-// inherently scoped to web/URL traffic, with no way to express
-// unrestricted (any-application) access.
-func (r *reconciler) installSecurityRule(scopeParam, scopeValue, folder, snippet, device string, trustZone, untrustZone string) error {
+// traffic from the trust zone to every zone in toZones (the primary
+// untrust zone, plus the secondary WAN's untrust02 zone if configured --
+// unlike NAT, one rule's To list can simply list both, since the
+// allow/any/any/any policy itself doesn't depend on egress interface). See
+// scm.SecurityRule's doc comment for why this is a standard rule
+// (application/service/category all "any") rather than SCM's simplified
+// "Internet Access Rule" (policy_type: "Internet") feature -- that type
+// turned out to be inherently scoped to web/URL traffic, with no way to
+// express unrestricted (any-application) access.
+func (r *reconciler) installSecurityRule(scopeParam, scopeValue, folder, snippet, device string, trustZone string, toZones []string) error {
 	target := scm.SecurityRule{
 		Name:        securityRuleName,
 		Folder:      folder,
 		Snippet:     snippet,
 		Device:      device,
 		From:        []string{trustZone},
-		To:          []string{untrustZone},
+		To:          toZones,
 		Source:      []string{"any"},
 		SourceUser:  []string{"any"},
 		Destination: []string{"any"},
@@ -775,23 +1112,50 @@ func (r *reconciler) uninstallItem(scopeParam, scopeValue, label string, it Reso
 	if err := r.deleteIfExists(scm.NATRulesPath, scopeParam, scopeValue, natRuleName, "pre", &changed); err != nil {
 		return fmt.Errorf("NAT rule: %w", err)
 	}
+	if it.Untrust02Interface != "" {
+		if err := r.deleteIfExists(scm.NATRulesPath, scopeParam, scopeValue, natRuleName02, "pre", &changed); err != nil {
+			return fmt.Errorf("secondary WAN NAT rule: %w", err)
+		}
+	}
 	if err := r.deleteIfExists(scm.DHCPInterfacesPath, scopeParam, scopeValue, it.TrustInterface, "", &changed); err != nil {
 		return fmt.Errorf("DHCP server: %w", err)
 	}
 	if err := r.removeInterfaceFromRouter(scopeParam, scopeValue, it, &changed); err != nil {
 		return fmt.Errorf("logical router: %w", err)
 	}
-	if err := r.removeInterfaceFromZone(scopeParam, scopeValue, untrustZoneName, it.UntrustInterface, &changed); err != nil {
+	untrustZoneTarget, _ := resolveConfiguredName(it.UntrustZone, untrustZoneName)
+	if err := r.removeInterfaceFromZone(scopeParam, scopeValue, untrustZoneTarget, it.UntrustInterface, &changed); err != nil {
 		return fmt.Errorf("untrust zone: %w", err)
 	}
-	if err := r.removeInterfaceFromZone(scopeParam, scopeValue, trustZoneName, it.TrustInterface, &changed); err != nil {
+	trustZoneTarget, _ := resolveConfiguredName(it.TrustZone, trustZoneName)
+	if err := r.removeInterfaceFromZone(scopeParam, scopeValue, trustZoneTarget, it.TrustInterface, &changed); err != nil {
 		return fmt.Errorf("trust zone: %w", err)
+	}
+	if it.Untrust02Interface != "" {
+		untrust02ZoneTarget, _ := resolveConfiguredName(it.Untrust02Zone, untrust02ZoneName)
+		if err := r.removeInterfaceFromZone(scopeParam, scopeValue, untrust02ZoneTarget, it.Untrust02Interface, &changed); err != nil {
+			return fmt.Errorf("secondary WAN zone: %w", err)
+		}
+		if err := r.deleteIfExists(scm.EthernetInterfacesPath, scopeParam, scopeValue, it.Untrust02Interface, "", &changed); err != nil {
+			return fmt.Errorf("secondary WAN interface: %w", err)
+		}
 	}
 	if err := r.deleteIfExists(scm.EthernetInterfacesPath, scopeParam, scopeValue, it.UntrustInterface, "", &changed); err != nil {
 		return fmt.Errorf("untrust interface: %w", err)
 	}
 	if err := r.deleteIfExists(scm.EthernetInterfacesPath, scopeParam, scopeValue, it.TrustInterface, "", &changed); err != nil {
 		return fmt.Errorf("trust interface: %w", err)
+	}
+	// Runs last: a var_list entry defining one of this item's own
+	// interface fields (e.g. $eth-internet02) is typically the very same
+	// object just deleted above, in which case this is a harmless no-op
+	// (findOwned inside reconcileVarList finds nothing) -- deleting it
+	// earlier, while the zone/router above still referenced it, would
+	// have hit a 409 conflict instead.
+	if listChanged, err := r.reconcileVarList(scopeParam, scopeValue, label, it.VarList); err != nil {
+		return fmt.Errorf("var_list: %w", err)
+	} else if listChanged {
+		changed = true
 	}
 
 	if !changed {
@@ -850,45 +1214,28 @@ func (r *reconciler) removeInterfaceFromZone(scopeParam, scopeValue, zoneName, i
 	return nil
 }
 
-// removeInterfaceFromRouter undoes installRouter. The static route is
-// only ever removed from an override we own at this exact scope --
-// mirroring ensureDefaultRoute, this must never directly edit whatever
-// router findRouterWithInterface locates, since that's commonly a shared
-// ancestor router used by devices/folders well beyond this item's scope.
-// If we never created an override here (e.g. this item never had a
-// static WAN gateway), there's nothing of ours to remove. Interface
-// membership itself is, likewise, only ever removed from a router owned
-// at this exact scope, never from an inherited/shared one.
+// removeInterfaceFromRouter undoes installRouter for both the primary and
+// (if configured) secondary WAN. The static route is only ever removed
+// from an override we own at this exact scope -- mirroring
+// ensureDefaultRoute, this must never directly edit whatever router
+// findRouterWithInterface locates, since that's commonly a shared ancestor
+// router used by devices/folders well beyond this item's scope. If we
+// never created an override here (e.g. this item never had a static WAN
+// gateway), there's nothing of ours to remove. Interface membership
+// itself is, likewise, only ever removed from a router owned at this
+// exact scope, never from an inherited/shared one.
 func (r *reconciler) removeInterfaceFromRouter(scopeParam, scopeValue string, it ResolvedItem, changed *bool) error {
-	if source, err := r.findRouterWithInterface(scopeParam, scopeValue, it.UntrustInterface); err != nil {
+	if err := r.removeDefaultRoute(scopeParam, scopeValue, it.UntrustInterface, defaultRouteName, changed); err != nil {
 		return err
-	} else if source != nil {
-		if ours, err := r.findOwned(scm.LogicalRoutersPath, scopeParam, scopeValue, source.Name, ""); err != nil {
-			return err
-		} else if ours != nil {
-			full, err := r.client.GetLogicalRouter(ours.ID)
-			if err != nil {
-				return err
-			}
-			vrf := vrfContaining(full.VRF, it.UntrustInterface)
-			if vrf != nil && vrf.RoutingTable != nil && vrf.RoutingTable.IP != nil {
-				before := len(vrf.RoutingTable.IP.StaticRoute)
-				vrf.RoutingTable.IP.StaticRoute = removeStaticRoute(vrf.RoutingTable.IP.StaticRoute, "gopangoblin-default-route")
-				if len(vrf.RoutingTable.IP.StaticRoute) != before {
-					if r.dryRun {
-						*changed = true
-					} else {
-						if _, err := r.client.UpdateLogicalRouter(full.ID, *full); err != nil {
-							return err
-						}
-						*changed = true
-					}
-				}
-			}
+	}
+	if it.Untrust02Interface != "" {
+		if err := r.removeDefaultRoute(scopeParam, scopeValue, it.Untrust02Interface, defaultRouteName02, changed); err != nil {
+			return fmt.Errorf("secondary WAN: %w", err)
 		}
 	}
 
-	existing, err := r.findOwned(scm.LogicalRoutersPath, scopeParam, scopeValue, routerName, "")
+	routerTarget, _ := resolveConfiguredName(it.Router, routerName)
+	existing, err := r.findOwned(scm.LogicalRoutersPath, scopeParam, scopeValue, routerTarget, "")
 	if err != nil {
 		return err
 	}
@@ -906,6 +1253,9 @@ func (r *reconciler) removeInterfaceFromRouter(scopeParam, scopeValue string, it
 	before := len(vrf.Interface)
 	vrf.Interface = removeString(vrf.Interface, it.TrustInterface)
 	vrf.Interface = removeString(vrf.Interface, it.UntrustInterface)
+	if it.Untrust02Interface != "" {
+		vrf.Interface = removeString(vrf.Interface, it.Untrust02Interface)
+	}
 	if len(vrf.Interface) == before {
 		return nil
 	}
@@ -920,70 +1270,255 @@ func (r *reconciler) removeInterfaceFromRouter(scopeParam, scopeValue string, it
 	return nil
 }
 
-// reconcileVariableOverride writes (or removes) one variable_overrides
-// entry's var_list against SCM, device-scoped.
-func (r *reconciler) reconcileVariableOverride(vo VariableOverride) error {
-	existing, err := r.client.ListVariablesByDevice(vo.Serial)
+// removeDefaultRoute removes the named static route for ifaceName from
+// whichever router owns it -- but only if we hold an override of that
+// router at this exact scope (see removeInterfaceFromRouter's doc
+// comment).
+func (r *reconciler) removeDefaultRoute(scopeParam, scopeValue, ifaceName, routeName string, changed *bool) error {
+	source, err := r.findRouterWithInterface(scopeParam, scopeValue, ifaceName)
 	if err != nil {
-		return fmt.Errorf("listing variables: %w", err)
+		return err
 	}
-	byName := map[string]scm.Variable{}
-	for _, v := range existing {
-		if v.Device == vo.Serial {
-			byName[v.Name] = v
-		}
+	if source == nil {
+		return nil
 	}
-
-	var changed bool
-	for _, item := range vo.VarList {
-		if r.mode == ModeUninstall {
-			if v, ok := byName[item.Name]; ok {
-				fmt.Printf("  [uninstall] %s: removing variable %s\n", vo.Name, item.Name)
-				if !r.dryRun {
-					if err := r.client.DeleteVariable(v.ID); err != nil && !scm.IsNotFound(err) {
-						return fmt.Errorf("deleting variable %s: %w", item.Name, err)
-					}
-				}
-				changed = true
-			}
-			continue
-		}
-
-		target := scm.Variable{Name: item.Name, Type: inferVariableType(item.Value), Value: item.Value, Device: vo.Serial}
-
-		existingVar, ok := byName[item.Name]
-		if !ok {
-			fmt.Printf("  [install] %s: setting variable %s = %s\n", vo.Name, item.Name, item.Value)
-			if !r.dryRun {
-				if _, err := r.client.CreateVariable(target); err != nil {
-					return fmt.Errorf("creating variable %s: %w", item.Name, err)
-				}
-			}
-			changed = true
-			continue
-		}
-
-		if r.mode == ModeInstall {
-			fmt.Printf("  [skip]   %s: variable %s already set\n", vo.Name, item.Name)
-			continue
-		}
-		if existingVar.Value == item.Value && existingVar.Type == target.Type {
-			fmt.Printf("  [skip]   %s: variable %s already set\n", vo.Name, item.Name)
-			continue
-		}
-		fmt.Printf("  [install] %s: updating variable %s = %s\n", vo.Name, item.Name, item.Value)
-		if !r.dryRun {
-			if _, err := r.client.UpdateVariable(existingVar.ID, target); err != nil {
-				return fmt.Errorf("updating variable %s: %w", item.Name, err)
-			}
-		}
-		changed = true
+	ours, err := r.findOwned(scm.LogicalRoutersPath, scopeParam, scopeValue, source.Name, "")
+	if err != nil {
+		return err
 	}
+	if ours == nil {
+		return nil
+	}
+	full, err := r.client.GetLogicalRouter(ours.ID)
+	if err != nil {
+		return err
+	}
+	vrf := vrfContaining(full.VRF, ifaceName)
+	if vrf == nil || vrf.RoutingTable == nil || vrf.RoutingTable.IP == nil {
+		return nil
+	}
+	before := len(vrf.RoutingTable.IP.StaticRoute)
+	vrf.RoutingTable.IP.StaticRoute = removeStaticRoute(vrf.RoutingTable.IP.StaticRoute, routeName)
+	if len(vrf.RoutingTable.IP.StaticRoute) == before {
+		return nil
+	}
+	if r.dryRun {
+		*changed = true
+		return nil
+	}
+	if _, err := r.client.UpdateLogicalRouter(full.ID, *full); err != nil {
+		return err
+	}
+	*changed = true
+	return nil
+}
 
+// reconcileVariableOverride writes (or removes) one variable_overrides
+// entry's var_list against SCM, scoped to whichever of Serial/Folder/
+// Snippet the entry names (see VariableOverride.Scope).
+func (r *reconciler) reconcileVariableOverride(vo VariableOverride) error {
+	scopeParam, scopeValue := vo.Scope()
+	changed, err := r.reconcileVarList(scopeParam, scopeValue, vo.Name, vo.VarList)
+	if err != nil {
+		return err
+	}
 	if changed {
-		r.markTouched(vo.Serial)
+		r.markAffected(scopeParam, scopeValue)
 	}
 	return nil
+}
+
+// interfaceNamePattern matches a literal PAN-OS interface identifier (e.g.
+// "ethernet1/2", "ae1", "loopback.5") -- see looksLikeInterfaceName.
+var interfaceNamePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9]*[0-9](/[0-9]+)*(\.[0-9]+)?$`)
+
+// looksLikeInterfaceName reports whether value is shaped like a literal
+// PAN-OS interface identifier rather than an IP/CIDR/range-shaped value.
+// Every real IP-shaped value this tool ever writes starts with a digit, so
+// requiring a leading letter cleanly separates the two without needing to
+// know which var_list entry is "supposed" to be which kind.
+func looksLikeInterfaceName(value string) bool {
+	return interfaceNamePattern.MatchString(value)
+}
+
+// reconcileVarList writes (or in uninstall mode, removes) each entry of
+// list at (scopeParam, scopeValue), dispatching per entry to either a
+// regular SCM variable (reconcileVar) or an ethernet-interfaces object's
+// default_value (reconcileInterfaceVar) -- see looksLikeInterfaceName.
+// Shared by variable_overrides entries and item_list entries' own
+// var_list. label is used only for log lines.
+func (r *reconciler) reconcileVarList(scopeParam, scopeValue, label string, list []VarItem) (bool, error) {
+	var changed bool
+	for _, item := range list {
+		var itemChanged bool
+		var err error
+		if looksLikeInterfaceName(item.Value) {
+			itemChanged, err = r.reconcileInterfaceVar(scopeParam, scopeValue, label, item)
+		} else {
+			itemChanged, err = r.reconcileVar(scopeParam, scopeValue, label, item)
+		}
+		if err != nil {
+			return changed, err
+		}
+		changed = changed || itemChanged
+	}
+	return changed, nil
+}
+
+// reconcileVar writes (or removes) item as a regular SCM variable at
+// (scopeParam, scopeValue).
+func (r *reconciler) reconcileVar(scopeParam, scopeValue, label string, item VarItem) (bool, error) {
+	folder, snippet, device := scopeFields(scopeParam, scopeValue)
+
+	existing, err := r.client.ListVariablesByScope(scopeParam, scopeValue)
+	if err != nil {
+		return false, fmt.Errorf("listing variables: %w", err)
+	}
+	var existingVar *scm.Variable
+	for i := range existing {
+		v := existing[i]
+		if v.Name == item.Name && v.Folder == folder && v.Snippet == snippet && v.Device == device {
+			existingVar = &v
+			break
+		}
+	}
+
+	if r.mode == ModeUninstall {
+		if existingVar == nil {
+			return false, nil
+		}
+		fmt.Printf("  [uninstall] %s: removing variable %s\n", label, item.Name)
+		if r.dryRun {
+			return true, nil
+		}
+		if err := r.client.DeleteVariable(existingVar.ID); err != nil && !scm.IsNotFound(err) {
+			return false, fmt.Errorf("deleting variable %s: %w", item.Name, err)
+		}
+		return true, nil
+	}
+
+	target := scm.Variable{Name: item.Name, Type: inferVariableType(item.Value), Value: item.Value, Folder: folder, Snippet: snippet, Device: device}
+
+	if existingVar == nil {
+		fmt.Printf("  [install] %s: setting variable %s = %s\n", label, item.Name, item.Value)
+		if r.dryRun {
+			return true, nil
+		}
+		if _, err := r.client.CreateVariable(target); err != nil {
+			return false, fmt.Errorf("creating variable %s: %w", item.Name, err)
+		}
+		return true, nil
+	}
+
+	if r.mode == ModeInstall {
+		fmt.Printf("  [skip]   %s: variable %s already set\n", label, item.Name)
+		return false, nil
+	}
+	if existingVar.Value == item.Value && existingVar.Type == target.Type {
+		fmt.Printf("  [skip]   %s: variable %s already set\n", label, item.Name)
+		return false, nil
+	}
+	fmt.Printf("  [install] %s: updating variable %s = %s\n", label, item.Name, item.Value)
+	if r.dryRun {
+		return true, nil
+	}
+	if _, err := r.client.UpdateVariable(existingVar.ID, target); err != nil {
+		return false, fmt.Errorf("updating variable %s: %w", item.Name, err)
+	}
+	return true, nil
+}
+
+// reconcileInterfaceVar writes (or removes) item as a custom interface
+// variable's default_value -- SCM's only mechanism for this (confirmed
+// live: the generic /variables resource has no "interface" type, so a
+// literal interface-shaped value is rejected by every real type in its
+// enum). This may be the very same ethernet-interfaces object
+// installEthernetInterface later manages for one of this item's own
+// interface fields (e.g. untrust02_interface: "$eth-internet02" paired
+// with a var_list entry defining it) -- installEthernetInterface's
+// existing fetch-and-merge already carries this default_value forward
+// when that happens, so no special-casing is needed here beyond
+// preserving Layer3 on our own update path, for the same reason.
+func (r *reconciler) reconcileInterfaceVar(scopeParam, scopeValue, label string, item VarItem) (bool, error) {
+	folder, snippet, device := scopeFields(scopeParam, scopeValue)
+
+	existing, err := r.findOwned(scm.EthernetInterfacesPath, scopeParam, scopeValue, item.Name, "")
+	if err != nil {
+		return false, err
+	}
+
+	if r.mode == ModeUninstall {
+		if existing == nil {
+			return false, nil
+		}
+		fmt.Printf("  [uninstall] %s: removing interface variable %s\n", label, item.Name)
+		if r.dryRun {
+			return true, nil
+		}
+		if err := r.client.DeleteByID(scm.EthernetInterfacesPath, existing.ID); err != nil && !scm.IsNotFound(err) {
+			return false, fmt.Errorf("deleting interface variable %s: %w", item.Name, err)
+		}
+		return true, nil
+	}
+
+	if existing == nil {
+		fmt.Printf("  [install] %s: defining interface variable %s = %s\n", label, item.Name, item.Value)
+		if r.dryRun {
+			return true, nil
+		}
+		target := scm.EthernetInterface{Name: item.Name, Folder: folder, Snippet: snippet, Device: device, DefaultValue: item.Value}
+		if _, err := r.client.CreateEthernetInterface(target); err != nil {
+			return false, fmt.Errorf("defining interface variable %s: %w", item.Name, err)
+		}
+		return true, nil
+	}
+
+	full, err := r.client.GetEthernetInterface(existing.ID)
+	if err != nil {
+		return false, err
+	}
+	if r.mode == ModeInstall || full.DefaultValue == item.Value {
+		fmt.Printf("  [skip]   %s: interface variable %s already defined\n", label, item.Name)
+		return false, nil
+	}
+	fmt.Printf("  [install] %s: updating interface variable %s = %s\n", label, item.Name, item.Value)
+	if r.dryRun {
+		return true, nil
+	}
+	target := scm.EthernetInterface{Name: item.Name, Folder: folder, Snippet: snippet, Device: device, DefaultValue: item.Value, Layer3: full.Layer3}
+	if _, err := r.client.UpdateEthernetInterface(existing.ID, target); err != nil {
+		return false, fmt.Errorf("updating interface variable %s: %w", item.Name, err)
+	}
+	return true, nil
+}
+
+// varListItemSatisfied reports whether item is already correctly defined
+// at (scopeParam, scopeValue), read-only -- mirrors reconcileVarList's two
+// mechanisms, used by itemFullyConfigured.
+func (r *reconciler) varListItemSatisfied(scopeParam, scopeValue string, item VarItem) (bool, error) {
+	if looksLikeInterfaceName(item.Value) {
+		obj, err := r.findOwned(scm.EthernetInterfacesPath, scopeParam, scopeValue, item.Name, "")
+		if err != nil || obj == nil {
+			return false, err
+		}
+		full, err := r.client.GetEthernetInterface(obj.ID)
+		if err != nil {
+			return false, err
+		}
+		return full.DefaultValue == item.Value, nil
+	}
+
+	folder, snippet, device := scopeFields(scopeParam, scopeValue)
+	vars, err := r.client.ListVariablesByScope(scopeParam, scopeValue)
+	if err != nil {
+		return false, err
+	}
+	for _, v := range vars {
+		if v.Name == item.Name && v.Folder == folder && v.Snippet == snippet && v.Device == device {
+			return v.Value == item.Value, nil
+		}
+	}
+	return false, nil
 }
 
 // inferVariableType picks an SCM variable "type" for value. SCM's type

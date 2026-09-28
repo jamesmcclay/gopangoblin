@@ -2,8 +2,8 @@
 // configures basic internet access -- trust/untrust interfaces, a LAN
 // DHCP server, a default SNAT rule, and an allow-all security policy --
 // on the folders, snippets, and firewalls listed in an internet.yml
-// playbook, and writes per-firewall SCM template-variable overrides from
-// an optional variable_overrides list.
+// playbook, and writes SCM template-variable overrides from an optional
+// variable_overrides list, scoped to a device, folder, or snippet.
 package internet
 
 import (
@@ -81,6 +81,15 @@ func (t *Tool) Run(args []string) error {
 			needSnippets = true
 		}
 	}
+	for _, vo := range pb.VariableOverrides {
+		switch {
+		case vo.Folder != "":
+			needFolders = true
+		case vo.Snippet != "":
+			needFolders = true // needed for ancestry-based push targeting
+			needSnippets = true
+		}
+	}
 
 	var folders []scm.Folder
 	if needFolders {
@@ -123,6 +132,11 @@ func (t *Tool) Run(args []string) error {
 	}
 
 	for _, vo := range pb.VariableOverrides {
+		if err := validateVariableOverrideScope(vo, devices, folders, snippets); err != nil {
+			fmt.Fprintf(os.Stderr, "internet: %s: %v\n", vo.Name, err)
+			failures++
+			continue
+		}
 		if err := r.reconcileVariableOverride(vo); err != nil {
 			fmt.Fprintf(os.Stderr, "internet: %s: %v\n", vo.Name, err)
 			failures++
@@ -166,6 +180,23 @@ func resolveItemScope(it ResolvedItem, devices []scm.Device, folders []scm.Folde
 		return "device", it.Serial, it.Name, nil
 	default:
 		return "", "", "", fmt.Errorf("unknown item type %q", it.Type)
+	}
+}
+
+// validateVariableOverrideScope fails fast if a variable_overrides entry's
+// serial/folder/snippet doesn't actually exist in SCM, mirroring
+// resolveItemScope's checks for item_list entries.
+func validateVariableOverrideScope(vo VariableOverride, devices []scm.Device, folders []scm.Folder, snippets []scm.Snippet) error {
+	switch {
+	case vo.Folder != "":
+		_, err := scm.ResolveFolderByName(folders, vo.Folder)
+		return err
+	case vo.Snippet != "":
+		_, err := scm.ResolveSnippetByName(snippets, vo.Snippet)
+		return err
+	default:
+		_, err := scm.ResolveDeviceBySerial(devices, vo.Serial)
+		return err
 	}
 }
 

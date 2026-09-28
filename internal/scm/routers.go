@@ -10,12 +10,18 @@ type LogicalRouterNexthop struct {
 	IPAddress string `json:"ip_address,omitempty"`
 }
 
-// LogicalRouterStaticRoute is one static route entry.
+// LogicalRouterStaticRoute is one static route entry. Metric is omitted
+// (PAN-OS defaults it to 10) unless explicitly set -- confirmed live:
+// PAN-OS commit rejects two static routes to the same destination sharing
+// one metric ("... is not unique among static routes to destination
+// 0.0.0.0/0"), which matters once a second default route (the optional
+// secondary WAN's) coexists with the primary's.
 type LogicalRouterStaticRoute struct {
 	Name        string               `json:"name"`
 	Destination string               `json:"destination"`
 	Interface   string               `json:"interface,omitempty"`
 	Nexthop     LogicalRouterNexthop `json:"nexthop"`
+	Metric      int                  `json:"metric,omitempty"`
 }
 
 // LogicalRouterRoutingTableIP holds the VRF's IPv4 static routes.
@@ -28,11 +34,42 @@ type LogicalRouterRoutingTable struct {
 	IP *LogicalRouterRoutingTableIP `json:"ip,omitempty"`
 }
 
+// VRFBGPRedistributionProfileIPv4 names the redistribution profile (by
+// name, e.g. "All-Connected-Routes") BGP redistributes IPv4 unicast routes
+// through.
+type VRFBGPRedistributionProfileIPv4 struct {
+	Unicast string `json:"unicast,omitempty"`
+}
+
+// VRFBGPRedistributionProfile is BGP's redistribution_profile object.
+type VRFBGPRedistributionProfile struct {
+	IPv4 *VRFBGPRedistributionProfileIPv4 `json:"ipv4,omitempty"`
+}
+
+// VRFBGP is the VRF's BGP protocol settings -- only the fields this tool
+// actually manages (Enable/LocalAS/RouterID/RedistributionProfile) are
+// modeled; every other field PAN-OS defaults on its own (graceful_restart,
+// med, admin_dists, etc., all confirmed live to already be present on the
+// lab's manually-configured scm_router). Confirmed live: SCM's
+// logical-routers PUT merges rather than replaces -- installRouter/
+// ensureDefaultRoute have round-tripped this same scm_router object many
+// times (fetch full router, modify one field, PUT the whole object back)
+// without ever stripping its BGP config, even though this struct (and VRF's
+// own AdminDists/RIBFilter, also unmodeled) can't carry those fields
+// forward -- so setting just these four fields here is safe.
+type VRFBGP struct {
+	Enable                *bool                        `json:"enable,omitempty"`
+	LocalAS               string                       `json:"local_as,omitempty"`
+	RouterID              string                       `json:"router_id,omitempty"`
+	RedistributionProfile *VRFBGPRedistributionProfile `json:"redistribution_profile,omitempty"`
+}
+
 // VRF is one virtual-router-forwarding entry within a logical router.
 type VRF struct {
 	Name         string                     `json:"name"`
 	Interface    []string                   `json:"interface,omitempty"`
 	RoutingTable *LogicalRouterRoutingTable `json:"routing_table,omitempty"`
+	BGP          *VRFBGP                    `json:"bgp,omitempty"`
 }
 
 // LogicalRouter is the request/response body for the /logical-routers

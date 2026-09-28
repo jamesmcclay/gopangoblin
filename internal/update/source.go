@@ -21,6 +21,7 @@ var syncPaths = []string{
 	"go.sum",
 	"setup.ps1",
 	"README.md",
+	"readme",
 	".gitignore",
 	"LICENSE-APACHE",
 	"LICENSE-MIT",

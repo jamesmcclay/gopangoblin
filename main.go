@@ -11,6 +11,7 @@ import (
 	_ "github.com/jamesmcclay/gopangoblin/internal/habuilder"
 	_ "github.com/jamesmcclay/gopangoblin/internal/internet"
 	_ "github.com/jamesmcclay/gopangoblin/internal/reset"
+	_ "github.com/jamesmcclay/gopangoblin/internal/sdwan"
 	"github.com/jamesmcclay/gopangoblin/internal/tool"
 	_ "github.com/jamesmcclay/gopangoblin/internal/update"
 )

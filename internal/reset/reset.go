@@ -72,18 +72,35 @@ func (t *Tool) Run(args []string) error {
 		return fmt.Errorf("listing SCM devices: %w", err)
 	}
 
+	// "Global" is a sentinel, not a real SCM folder -- confirmed live, it
+	// doesn't appear in /config/setup/v1/folders and most resources 400
+	// with "Folder Global doesn't exist" when queried with it. It targets
+	// tenant-global config instead (currently just Auto VPN clusters -- see
+	// reconciler.reconcileGlobal), so it's pulled out of folder_list before
+	// the real folders are resolved by name.
+	const globalScopeName = "Global"
+	var folderEntries []FolderEntry
+	wantGlobal := false
+	for _, f := range pb.FolderList {
+		if f.Name == globalScopeName {
+			wantGlobal = true
+			continue
+		}
+		folderEntries = append(folderEntries, f)
+	}
+
 	// Folders are needed not just to resolve folder_list, but also (via
 	// their Parent/Snippets fields) to figure out which devices actually
 	// inherit from a wiped folder or snippet, so push can target them --
 	// so fetch them whenever either list is used, not just folder_list.
 	var folders []scm.Folder
-	if len(pb.FolderList) > 0 || len(pb.SnippetList) > 0 {
+	if len(folderEntries) > 0 || len(pb.SnippetList) > 0 {
 		folders, err = client.ListFolders()
 		if err != nil {
 			return fmt.Errorf("listing SCM folders: %w", err)
 		}
 	}
-	resolvedFolders, err := resolveFolders(pb.FolderList, folders)
+	resolvedFolders, err := resolveFolders(folderEntries, folders)
 	if err != nil {
 		return err
 	}
@@ -107,10 +124,41 @@ func (t *Tool) Run(args []string) error {
 		folders: folders,
 	}
 
-	fmt.Printf("reset: playbook %q, %d device(s), %d folder(s), %d snippet(s)\n",
-		pb.Name, len(fws), len(resolvedFolders), len(resolvedSnippets))
+	fmt.Printf("reset: playbook %q, %d device(s), %d folder(s), %d snippet(s), global=%v\n",
+		pb.Name, len(fws), len(resolvedFolders), len(resolvedSnippets), wantGlobal)
 
 	var failures int
+
+	// Global runs first, before anything folder/snippet/device-scoped:
+	// an Auto VPN cluster names ethernet-interfaces/logical-routers/
+	// sdwan-interface-profiles by reference, and SCM enforces that
+	// referential integrity on delete -- confirmed live, running this
+	// after the folder wipe left scm_router, both WAN interfaces, and
+	// both sdwan-interface-profiles permanently stuck 409ing against
+	// "still referenced" while the cluster naming them was still alive.
+	// Removing the cluster first can only ever reduce what's referenced
+	// elsewhere, never add to it, so it's always safe to do first
+	// regardless of what else this playbook targets.
+	//
+	// A failure here is fatal to the whole run, not just counted and
+	// continued past: confirmed live, SCM occasionally 403s a cluster
+	// delete transiently (retrying the exact same call seconds later with
+	// no code change succeeds) -- but every later folder/device wipe
+	// assumes the cluster is already gone, so pressing on regardless
+	// cascades into a wall of confusing "still referenced" 409 deadlocks
+	// that don't actually explain the root cause, and still attempts a
+	// final push against a half-wiped, referentially-inconsistent
+	// candidate config, which was observed to hang and time out rather
+	// than fail cleanly. Stopping here instead leaves candidate config
+	// exactly as before (nothing else was touched yet), so simply
+	// re-running reset is the correct recovery -- as seen live, a
+	// transient failure here typically succeeds on retry.
+	if wantGlobal {
+		if err := r.reconcileGlobal(); err != nil {
+			return fmt.Errorf("Global: %w -- aborting before any folder/device/snippet wipe or push (see reset.go's Run comment)", err)
+		}
+	}
+
 	for _, fw := range fws {
 		device, err := scm.ResolveDeviceBySerial(devices, fw.Serial)
 		if err != nil {
@@ -139,7 +187,15 @@ func (t *Tool) Run(args []string) error {
 	}
 
 	touched := r.touchedSerials()
-	if pb.Push && !*noPush && !*dryRun && len(touched) > 0 {
+	if failures > 0 {
+		// Skip the push rather than attempt one anyway: confirmed live, a
+		// candidate config left half-wiped by a failed folder/device/
+		// snippet reconcile (e.g. some objects deleted, others still
+		// stuck on a dependency conflict) can leave push itself hanging
+		// and timing out instead of failing cleanly, on top of the
+		// wipe failure already reported above.
+		fmt.Fprintf(os.Stderr, "reset: skipping push: %d wipe failure(s) above left candidate config in an unknown state\n", failures)
+	} else if pb.Push && !*noPush && !*dryRun && len(touched) > 0 {
 		if err := pushChanges(client, pb, touched); err != nil {
 			fmt.Fprintf(os.Stderr, "reset: push: %v\n", err)
 			failures++
