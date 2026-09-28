@@ -3,7 +3,7 @@ package habuilder
 import "testing"
 
 func TestLoadPlaybookResolvesDefaults(t *testing.T) {
-	pb, err := LoadPlaybook("../../playbooks/ha_pairs.yml")
+	pb, err := LoadPlaybook("../../playbooks/habuilder.yml")
 	if err != nil {
 		t.Fatalf("LoadPlaybook: %v", err)
 	}

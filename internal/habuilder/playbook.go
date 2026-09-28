@@ -16,7 +16,7 @@ const (
 	ModeUninstall       Mode = "uninstall"        // remove HA config from every device in the playbook
 )
 
-// Playbook is the parsed structure of a ha_pairs.yml file.
+// Playbook is the parsed structure of a habuilder.yml file.
 type Playbook struct {
 	Name   string            `yaml:"name"`
 	Mode   Mode              `yaml:"mode"`
@@ -185,7 +185,7 @@ func (fw FirewallPair) Resolve(vars, varNames map[string]string) (ResolvedFirewa
 	return r, nil
 }
 
-// LoadPlaybook reads and parses a ha_pairs.yml file.
+// LoadPlaybook reads and parses a habuilder.yml file.
 func LoadPlaybook(path string) (*Playbook, error) {
 	var pb Playbook
 	if err := tool.LoadYAML(path, &pb); err != nil {

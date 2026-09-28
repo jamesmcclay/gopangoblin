@@ -176,6 +176,18 @@ pang internet
 # Point at a different playbook
 pang internet --playbook playbooks/other_internet.yml
 
+# Pass credentials as flags instead of env vars
+pang internet \
+  --client-id 'service1@12345.iam.panserviceaccount.com' \
+  --client-secret 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' \
+  --tsg-id '12345'
+
 # Run the playbook but skip the automatic push, even if it sets push: true
 pang internet --no-push
+
+# See all available flags
+pang internet -h
+
+# List every registered tool
+pang help
 ```

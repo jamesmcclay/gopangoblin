@@ -212,6 +212,18 @@ pang reset
 # Point at a different playbook
 pang reset --playbook playbooks/other_reset.yml
 
+# Pass credentials as flags instead of env vars
+pang reset \
+  --client-id 'service1@12345.iam.panserviceaccount.com' \
+  --client-secret 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' \
+  --tsg-id '12345'
+
 # Run the playbook but skip the automatic push, even if it sets push: true
 pang reset --no-push
+
+# See all available flags
+pang reset -h
+
+# List every registered tool
+pang help
 ```

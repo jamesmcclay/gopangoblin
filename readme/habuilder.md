@@ -7,7 +7,7 @@ with HA2 (data link) session sync over the raw ethernet transport.
 Uses the same SCM credentials as every other tool here — see the main
 [README's Credentials section](../README.md#credentials).
 
-## Playbook format (`ha_pairs.yml`)
+## Playbook format (`habuilder.yml`)
 
 ```yaml
 name: JamesTheGreat's HA FW List
@@ -51,7 +51,7 @@ fw_list:
 # See what would change, without calling the SCM API (safe against a live tenant)
 pang habuilder --dry-run
 
-# Use the default playbook path (playbooks/ha_pairs.yml)
+# Use the default playbook path (playbooks/habuilder.yml)
 pang habuilder
 
 # Point at a different playbook

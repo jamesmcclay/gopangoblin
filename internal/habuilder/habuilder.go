@@ -1,6 +1,6 @@
 // Package habuilder implements the "habuilder" gopangoblin tool: it builds
 // (or tears down) Strata Cloud Manager HA configurations for the firewall
-// pairs listed in a ha_pairs.yml playbook.
+// pairs listed in a habuilder.yml playbook.
 package habuilder
 
 import (
@@ -24,7 +24,7 @@ func init() {
 		Use:   "habuilder",
 		Short: "Build or remove Strata Cloud Manager HA configs from a playbook",
 	}
-	flags := tool.AddSCMFlags(cmd, "playbooks/ha_pairs.yml")
+	flags := tool.AddSCMFlags(cmd, "playbooks/habuilder.yml")
 	cmd.RunE = func(cmd *cobra.Command, args []string) error {
 		return run(flags)
 	}

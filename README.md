@@ -96,19 +96,40 @@ the available flags (`--repo`, `--branch`, `--output`).
 
 `habuilder`, `reset`, `internet`, and `sdwan` all talk to the same SCM
 config API and authenticate as a service account (OAuth2 client
-credentials), via flags or environment variables:
+credentials), resolved in this order — each one only used if the one
+before it didn't supply a value:
 
-| Flag              | Env var             | Description                              |
-|-------------------|----------------------|-------------------------------------------|
-| `--client-id`      | `SCM_CLIENT_ID`      | Service account client ID (looks like an email, e.g. `svc@<tsg_id>.iam.panserviceaccount.com`) |
-| `--client-secret`  | `SCM_CLIENT_SECRET`  | Service account client secret            |
-| `--tsg-id`         | `SCM_TSG_ID`         | Tenant Service Group ID (the numeric segment of the client ID's domain) |
+| # | Source                                              | Example |
+|---|------------------------------------------------------|---------|
+| 1 | `--client-id` / `--client-secret` / `--tsg-id` flags | `pang sdwan --client-id '...' --client-secret '...' --tsg-id '12345'` |
+| 2 | `SCM_CLIENT_ID` / `SCM_CLIENT_SECRET` / `SCM_TSG_ID` env vars | `export SCM_CLIENT_ID='service1@12345.iam.panserviceaccount.com'` |
+| 3 | A shared YAML file (`--shared-config`, default `playbooks/shared.yml`) | see below |
+
+A flag always wins over an env var, which always wins over the shared
+file — so the shared file is a fallback default, never something you have
+to override every time it doesn't apply.
 
 ```sh
 export SCM_CLIENT_ID='service1@12345.iam.panserviceaccount.com'
 export SCM_CLIENT_SECRET='...'
 export SCM_TSG_ID='12345'
 ```
+
+Or, so you never have to export those for a new shell session, put them
+once in `playbooks/shared.yml` (create the file — `playbooks/` is
+git-ignored, so this never gets committed):
+
+```yaml
+client_id: "service1@12345.iam.panserviceaccount.com"
+client_secret: "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+tsg_id: "12345"
+```
+
+Every one of these four tools looks for that same file automatically —
+nothing else to wire up per tool. A missing `shared.yml` is fine (it's
+optional, source 3 above just contributes nothing); a `shared.yml` that
+exists but fails to parse is a hard error rather than being silently
+skipped.
 
 > **Note:** the service account must have a role bound in Strata Cloud
 > Manager (Settings → Identity & Access → Service Accounts) that grants
@@ -124,18 +145,19 @@ push for one run even if the playbook sets `push: true`).
 ## Project layout
 
 ```
-main.go                         CLI entrypoint and tool dispatch
-internal/tool/                  Tool registry
+main.go                         CLI entrypoint (builds the root Cobra command)
+internal/tool/                  Tool registry + shared Cobra flag/Viper config helpers
 internal/habuilder/             habuilder tool: playbook parsing + reconciliation
 internal/reset/                 reset tool: playbook parsing + config wipe
 internal/internet/              internet tool: playbook parsing + basic internet access setup
 internal/sdwan/                 sdwan tool: playbook parsing + PAN-OS SD-WAN setup
 internal/scm/                   Strata Cloud Manager API client (shared by every tool)
 internal/update/                update tool: pulls source from GitHub and rebuilds
-playbooks/ha_pairs.yml          Example/working habuilder playbook
+playbooks/habuilder.yml         Example/working habuilder playbook
 playbooks/reset.yml             Example/working reset playbook
 playbooks/internet.yml          Example/working internet playbook
 playbooks/sdwan.yml             Example/working sdwan playbook
+playbooks/shared.yml            Optional -- client_id/client_secret/tsg_id, see Credentials above
 readme/                         Per-tool documentation
 ```
 

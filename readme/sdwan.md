@@ -308,8 +308,20 @@ pang sdwan
 # Point at a different playbook
 pang sdwan --playbook playbooks/other_sdwan.yml
 
+# Pass credentials as flags instead of env vars
+pang sdwan \
+  --client-id 'service1@12345.iam.panserviceaccount.com' \
+  --client-secret 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' \
+  --tsg-id '12345'
+
 # Run the playbook but skip the automatic push, even if it sets push: true
 pang sdwan --no-push
+
+# See all available flags
+pang sdwan -h
+
+# List every registered tool
+pang help
 ```
 
 To tear down just the SD-WAN layer (leaving `internet`'s base config in

@@ -30,10 +30,18 @@ untouched.
 | `--branch`  | `main`                                        | Branch to pull                        |
 | `--output`  | `pang` (`pang.exe` on Windows)                | Path to write the rebuilt binary to   |
 
+## Example commands
+
 ```sh
 # Rebuild from a different branch, e.g. to try an in-progress feature
 pang update --branch dev
 
 # Rebuild to a distinct path instead of overwriting the current binary
 pang update --output pang-new
+
+# See all available flags
+pang update -h
+
+# List every registered tool
+pang help
 ```
