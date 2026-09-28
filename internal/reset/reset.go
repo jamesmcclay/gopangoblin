@@ -8,10 +8,11 @@
 package reset
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/jamesmcclay/gopangoblin/internal/scm"
 	"github.com/jamesmcclay/gopangoblin/internal/tool"
@@ -23,35 +24,23 @@ const (
 )
 
 func init() {
-	tool.Register(&Tool{})
+	cmd := &cobra.Command{
+		Use:   "reset",
+		Short: "Wipe SCM-managed firewall config back to just its HA/network/security/objects baseline",
+	}
+	flags := tool.AddSCMFlags(cmd, "playbooks/reset.yml")
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return run(flags)
+	}
+	tool.Register(cmd)
 }
 
-// Tool is the "reset" gopangoblin tool.
-type Tool struct{}
-
-func (t *Tool) Name() string { return "reset" }
-
-func (t *Tool) Summary() string {
-	return "Wipe SCM-managed firewall config back to just its HA/network/security/objects baseline"
-}
-
-func (t *Tool) Run(args []string) error {
-	fs := flag.NewFlagSet("reset", flag.ExitOnError)
-	playbookPath := fs.String("playbook", "playbooks/reset.yml", "path to the reset.yml playbook")
-	clientID := fs.String("client-id", os.Getenv("SCM_CLIENT_ID"), "SCM service account client ID (env SCM_CLIENT_ID)")
-	clientSecret := fs.String("client-secret", os.Getenv("SCM_CLIENT_SECRET"), "SCM service account client secret (env SCM_CLIENT_SECRET)")
-	tsgID := fs.String("tsg-id", os.Getenv("SCM_TSG_ID"), "SCM Tenant Service Group ID (env SCM_TSG_ID)")
-	dryRun := fs.Bool("dry-run", false, "print planned actions without calling the SCM API")
-	noPush := fs.Bool("no-push", false, "skip the automatic config push even if the playbook sets push: true")
-	if err := fs.Parse(args); err != nil {
+func run(flags *tool.SCMFlags) error {
+	if err := flags.Validate(); err != nil {
 		return err
 	}
 
-	if *clientID == "" || *clientSecret == "" || *tsgID == "" {
-		return fmt.Errorf("client-id, client-secret, and tsg-id are all required (flags or SCM_CLIENT_ID/SCM_CLIENT_SECRET/SCM_TSG_ID env vars)")
-	}
-
-	pb, err := LoadPlaybook(*playbookPath)
+	pb, err := LoadPlaybook(flags.Playbook)
 	if err != nil {
 		return err
 	}
@@ -62,9 +51,9 @@ func (t *Tool) Run(args []string) error {
 	}
 
 	client := scm.NewClient(scm.Credentials{
-		ClientID:     *clientID,
-		ClientSecret: *clientSecret,
-		TSGID:        *tsgID,
+		ClientID:     flags.ClientID,
+		ClientSecret: flags.ClientSecret,
+		TSGID:        flags.TSGID,
 	})
 
 	devices, err := client.ListDevices()
@@ -119,7 +108,7 @@ func (t *Tool) Run(args []string) error {
 
 	r := &reconciler{
 		client:  client,
-		dryRun:  *dryRun,
+		dryRun:  flags.DryRun,
 		devices: devices,
 		folders: folders,
 	}
@@ -195,7 +184,7 @@ func (t *Tool) Run(args []string) error {
 		// and timing out instead of failing cleanly, on top of the
 		// wipe failure already reported above.
 		fmt.Fprintf(os.Stderr, "reset: skipping push: %d wipe failure(s) above left candidate config in an unknown state\n", failures)
-	} else if pb.Push && !*noPush && !*dryRun && len(touched) > 0 {
+	} else if pb.Push && !flags.NoPush && !flags.DryRun && len(touched) > 0 {
 		if err := pushChanges(client, pb, touched); err != nil {
 			fmt.Fprintf(os.Stderr, "reset: push: %v\n", err)
 			failures++

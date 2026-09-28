@@ -2,9 +2,8 @@ package sdwan
 
 import (
 	"fmt"
-	"os"
 
-	"gopkg.in/yaml.v3"
+	"github.com/jamesmcclay/gopangoblin/internal/tool"
 )
 
 // Mode controls how the sdwan tool reconciles the playbook against SCM.
@@ -219,14 +218,9 @@ func (pb *Playbook) Resolved() (*Resolved, error) {
 
 // LoadPlaybook reads and parses an sdwan.yml file.
 func LoadPlaybook(path string) (*Playbook, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading playbook: %w", err)
-	}
-
 	var pb Playbook
-	if err := yaml.Unmarshal(data, &pb); err != nil {
-		return nil, fmt.Errorf("parsing playbook: %w", err)
+	if err := tool.LoadYAML(path, &pb); err != nil {
+		return nil, err
 	}
 
 	switch pb.Mode {

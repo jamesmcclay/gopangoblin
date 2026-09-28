@@ -26,14 +26,14 @@ untouched.
 
 | Flag       | Default                                     | Description                          |
 |------------|----------------------------------------------|---------------------------------------|
-| `-repo`    | `https://github.com/jamesmcclay/gopangoblin` | Repo to pull from                     |
-| `-branch`  | `main`                                        | Branch to pull                        |
-| `-output`  | `pang` (`pang.exe` on Windows)                | Path to write the rebuilt binary to   |
+| `--repo`    | `https://github.com/jamesmcclay/gopangoblin` | Repo to pull from                     |
+| `--branch`  | `main`                                        | Branch to pull                        |
+| `--output`  | `pang` (`pang.exe` on Windows)                | Path to write the rebuilt binary to   |
 
 ```sh
 # Rebuild from a different branch, e.g. to try an in-progress feature
-pang update -branch dev
+pang update --branch dev
 
 # Rebuild to a distinct path instead of overwriting the current binary
-pang update -output pang-new
+pang update --output pang-new
 ```

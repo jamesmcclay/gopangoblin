@@ -2,9 +2,8 @@ package reset
 
 import (
 	"fmt"
-	"os"
 
-	"gopkg.in/yaml.v3"
+	"github.com/jamesmcclay/gopangoblin/internal/tool"
 )
 
 // Playbook is the parsed structure of a reset.yml file.
@@ -54,14 +53,9 @@ func (fw FirewallEntry) Resolve() (ResolvedFirewall, error) {
 
 // LoadPlaybook reads and parses a reset.yml file.
 func LoadPlaybook(path string) (*Playbook, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading playbook: %w", err)
-	}
-
 	var pb Playbook
-	if err := yaml.Unmarshal(data, &pb); err != nil {
-		return nil, fmt.Errorf("parsing playbook: %w", err)
+	if err := tool.LoadYAML(path, &pb); err != nil {
+		return nil, err
 	}
 
 	if len(pb.FwList) == 0 && len(pb.FolderList) == 0 && len(pb.SnippetList) == 0 {

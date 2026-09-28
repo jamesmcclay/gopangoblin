@@ -7,10 +7,10 @@
 package sdwan
 
 import (
-	"flag"
 	"fmt"
-	"os"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/jamesmcclay/gopangoblin/internal/scm"
 	"github.com/jamesmcclay/gopangoblin/internal/tool"
@@ -22,35 +22,23 @@ const (
 )
 
 func init() {
-	tool.Register(&Tool{})
+	cmd := &cobra.Command{
+		Use:   "sdwan",
+		Short: "Configure PAN-OS SD-WAN (interface/distribution profiles, BGP, steering rules, Auto VPN cluster) on SCM targets",
+	}
+	flags := tool.AddSCMFlags(cmd, "playbooks/sdwan.yml")
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return run(flags)
+	}
+	tool.Register(cmd)
 }
 
-// Tool is the "sdwan" gopangoblin tool.
-type Tool struct{}
-
-func (t *Tool) Name() string { return "sdwan" }
-
-func (t *Tool) Summary() string {
-	return "Configure PAN-OS SD-WAN (interface/distribution profiles, BGP, steering rules, Auto VPN cluster) on SCM targets"
-}
-
-func (t *Tool) Run(args []string) error {
-	fs := flag.NewFlagSet("sdwan", flag.ExitOnError)
-	playbookPath := fs.String("playbook", "playbooks/sdwan.yml", "path to the sdwan.yml playbook")
-	clientID := fs.String("client-id", os.Getenv("SCM_CLIENT_ID"), "SCM service account client ID (env SCM_CLIENT_ID)")
-	clientSecret := fs.String("client-secret", os.Getenv("SCM_CLIENT_SECRET"), "SCM service account client secret (env SCM_CLIENT_SECRET)")
-	tsgID := fs.String("tsg-id", os.Getenv("SCM_TSG_ID"), "SCM Tenant Service Group ID (env SCM_TSG_ID)")
-	dryRun := fs.Bool("dry-run", false, "print planned actions without calling the SCM API")
-	noPush := fs.Bool("no-push", false, "skip the automatic config push even if the playbook sets push: true")
-	if err := fs.Parse(args); err != nil {
+func run(flags *tool.SCMFlags) error {
+	if err := flags.Validate(); err != nil {
 		return err
 	}
 
-	if *clientID == "" || *clientSecret == "" || *tsgID == "" {
-		return fmt.Errorf("client-id, client-secret, and tsg-id are all required (flags or SCM_CLIENT_ID/SCM_CLIENT_SECRET/SCM_TSG_ID env vars)")
-	}
-
-	pb, err := LoadPlaybook(*playbookPath)
+	pb, err := LoadPlaybook(flags.Playbook)
 	if err != nil {
 		return err
 	}
@@ -60,9 +48,9 @@ func (t *Tool) Run(args []string) error {
 	}
 
 	client := scm.NewClient(scm.Credentials{
-		ClientID:     *clientID,
-		ClientSecret: *clientSecret,
-		TSGID:        *tsgID,
+		ClientID:     flags.ClientID,
+		ClientSecret: flags.ClientSecret,
+		TSGID:        flags.TSGID,
 	})
 
 	folders, err := client.ListFolders()
@@ -86,7 +74,7 @@ func (t *Tool) Run(args []string) error {
 		deviceFolders[s.Serial] = d.Folder
 	}
 
-	r := &reconciler{client: client, dryRun: *dryRun, mode: pb.Mode, folder: resolved.Folder, deviceFolders: deviceFolders}
+	r := &reconciler{client: client, dryRun: flags.DryRun, mode: pb.Mode, folder: resolved.Folder, deviceFolders: deviceFolders}
 
 	fmt.Printf("sdwan: playbook %q, mode %s, folder %q, %d hub(s), %d branch(es)\n",
 		pb.Name, pb.Mode, resolved.Folder, len(resolved.Hubs), len(resolved.Branches))
@@ -96,7 +84,7 @@ func (t *Tool) Run(args []string) error {
 	}
 
 	touched := r.touchedSerials()
-	if pb.Push && !*noPush && !*dryRun && len(touched) > 0 {
+	if pb.Push && !flags.NoPush && !flags.DryRun && len(touched) > 0 {
 		if err := pushChanges(client, pb, touched); err != nil {
 			return fmt.Errorf("push: %w", err)
 		}

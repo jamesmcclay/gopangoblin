@@ -4,10 +4,11 @@
 package habuilder
 
 import (
-	"flag"
 	"fmt"
 	"os"
 	"time"
+
+	"github.com/spf13/cobra"
 
 	"github.com/jamesmcclay/gopangoblin/internal/scm"
 	"github.com/jamesmcclay/gopangoblin/internal/tool"
@@ -19,35 +20,23 @@ const (
 )
 
 func init() {
-	tool.Register(&Tool{})
+	cmd := &cobra.Command{
+		Use:   "habuilder",
+		Short: "Build or remove Strata Cloud Manager HA configs from a playbook",
+	}
+	flags := tool.AddSCMFlags(cmd, "playbooks/ha_pairs.yml")
+	cmd.RunE = func(cmd *cobra.Command, args []string) error {
+		return run(flags)
+	}
+	tool.Register(cmd)
 }
 
-// Tool is the "habuilder" gopangoblin tool.
-type Tool struct{}
-
-func (t *Tool) Name() string { return "habuilder" }
-
-func (t *Tool) Summary() string {
-	return "Build or remove Strata Cloud Manager HA configs from a playbook"
-}
-
-func (t *Tool) Run(args []string) error {
-	fs := flag.NewFlagSet("habuilder", flag.ExitOnError)
-	playbookPath := fs.String("playbook", "playbooks/ha_pairs.yml", "path to the ha_pairs.yml playbook")
-	clientID := fs.String("client-id", os.Getenv("SCM_CLIENT_ID"), "SCM service account client ID (env SCM_CLIENT_ID)")
-	clientSecret := fs.String("client-secret", os.Getenv("SCM_CLIENT_SECRET"), "SCM service account client secret (env SCM_CLIENT_SECRET)")
-	tsgID := fs.String("tsg-id", os.Getenv("SCM_TSG_ID"), "SCM Tenant Service Group ID (env SCM_TSG_ID)")
-	dryRun := fs.Bool("dry-run", false, "print planned actions without calling the SCM API")
-	noPush := fs.Bool("no-push", false, "skip the automatic config push even if the playbook sets push: true")
-	if err := fs.Parse(args); err != nil {
+func run(flags *tool.SCMFlags) error {
+	if err := flags.Validate(); err != nil {
 		return err
 	}
 
-	if *clientID == "" || *clientSecret == "" || *tsgID == "" {
-		return fmt.Errorf("client-id, client-secret, and tsg-id are all required (flags or SCM_CLIENT_ID/SCM_CLIENT_SECRET/SCM_TSG_ID env vars)")
-	}
-
-	pb, err := LoadPlaybook(*playbookPath)
+	pb, err := LoadPlaybook(flags.Playbook)
 	if err != nil {
 		return err
 	}
@@ -58,9 +47,9 @@ func (t *Tool) Run(args []string) error {
 	}
 
 	client := scm.NewClient(scm.Credentials{
-		ClientID:     *clientID,
-		ClientSecret: *clientSecret,
-		TSGID:        *tsgID,
+		ClientID:     flags.ClientID,
+		ClientSecret: flags.ClientSecret,
+		TSGID:        flags.TSGID,
 	})
 
 	devices, err := client.ListDevices()
@@ -71,7 +60,7 @@ func (t *Tool) Run(args []string) error {
 	r := &reconciler{
 		client: client,
 		mode:   pb.Mode,
-		dryRun: *dryRun,
+		dryRun: flags.DryRun,
 	}
 
 	fmt.Printf("habuilder: playbook %q, mode %s, %d HA pair(s)\n", pb.Name, pb.Mode, len(pairs))
@@ -84,7 +73,7 @@ func (t *Tool) Run(args []string) error {
 		}
 	}
 
-	if pb.Push && !*noPush && !*dryRun && len(r.touched) > 0 {
+	if pb.Push && !flags.NoPush && !flags.DryRun && len(r.touched) > 0 {
 		if err := pushChanges(client, pb, r.touched); err != nil {
 			fmt.Fprintf(os.Stderr, "habuilder: push: %v\n", err)
 			failures++

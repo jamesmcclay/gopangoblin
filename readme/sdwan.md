@@ -15,6 +15,13 @@ create them if missing.
 Uses the same SCM credentials as every other tool here — see the main
 [README's Credentials section](../README.md#credentials).
 
+Playbooks are parsed with [Viper](https://github.com/spf13/viper) — always
+quote a `serial` (or any other field that's purely digits): unquoted, a
+value like `007954000909285` gets parsed as a number and silently loses
+its leading zeros. See [`habuilder`'s docs](habuilder.md) for the full
+explanation (it also covers Viper's map-key lowercasing, which doesn't
+apply to `sdwan.yml` since none of its `vars` keys use mixed case).
+
 ## Playbook format (`sdwan.yml`)
 
 Unlike `internet.yml` (an `item_list` of independently-scoped
@@ -47,19 +54,19 @@ vars:
 cluster_name: james-cluster
 hub_list:
   - name: Hub A
-    serial: 12345
+    serial: "12345"
     site: hub01
     priority: "1"
     router_id: 1.1.1.1
     asn: "65001"
 branch_list:
   - name: Branch A
-    serial: 67890
+    serial: "67890"
     site: branch01
     router_id: 2.2.2.2
     asn: "65002"
   - name: Branch B
-    serial: 54321
+    serial: "54321"
     site: branch02
     router_id: 3.3.3.3
     asn: "65003"
@@ -281,8 +288,8 @@ per-device-folder `scm_router` shadow object (holding the auto-generated
 tunnel/loopback interfaces above) at each hub's and branch's own SCM
 **device folder** (e.g. `Hub`, `Branches`) — not something this tool
 writes, a side effect of the cluster existing at all. If you're wiping
-this deployment with [`reset`](reset.md) rather than `sdwan -mode
-uninstall`, those device folders need their own `folder_list` entries
+this deployment with [`reset`](reset.md) rather than `sdwan.yml`'s
+`mode: uninstall`, those device folders need their own `folder_list` entries
 (ordered *before* the folder `sdwan.yml` itself targets) alongside
 `Global` — see reset.md's own notes on folder wipe ordering — otherwise
 the shadow `scm_router` (and, under `internet_routing: backhaul`, the
@@ -293,16 +300,16 @@ hub-folder `internet-traffic` override) will block deletion of the shared
 
 ```sh
 # See what would change, without calling the SCM API
-pang sdwan -dry-run
+pang sdwan --dry-run
 
 # Use the default playbook path (playbooks/sdwan.yml)
 pang sdwan
 
 # Point at a different playbook
-pang sdwan -playbook playbooks/other_sdwan.yml
+pang sdwan --playbook playbooks/other_sdwan.yml
 
 # Run the playbook but skip the automatic push, even if it sets push: true
-pang sdwan -no-push
+pang sdwan --no-push
 ```
 
 To tear down just the SD-WAN layer (leaving `internet`'s base config in

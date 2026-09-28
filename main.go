@@ -8,6 +8,8 @@ import (
 	"os"
 	"path/filepath"
 
+	"github.com/spf13/cobra"
+
 	_ "github.com/jamesmcclay/gopangoblin/internal/habuilder"
 	_ "github.com/jamesmcclay/gopangoblin/internal/internet"
 	_ "github.com/jamesmcclay/gopangoblin/internal/reset"
@@ -16,37 +18,24 @@ import (
 	_ "github.com/jamesmcclay/gopangoblin/internal/update"
 )
 
-var progName = filepath.Base(os.Args[0])
-
 func main() {
-	if len(os.Args) < 2 {
-		usage()
+	root := &cobra.Command{
+		Use:           filepath.Base(os.Args[0]),
+		Short:         "Tools for Palo Alto Networks Strata Cloud Manager automation",
+		SilenceUsage:  true,
+		SilenceErrors: true,
+	}
+	for _, cmd := range tool.All() {
+		root.AddCommand(cmd)
+	}
+
+	executed, err := root.ExecuteC()
+	if err != nil {
+		if executed != nil && executed != root {
+			fmt.Fprintf(os.Stderr, "%s %s: %v\n", root.Name(), executed.Name(), err)
+		} else {
+			fmt.Fprintf(os.Stderr, "%s: %v\n", root.Name(), err)
+		}
 		os.Exit(1)
-	}
-
-	name := os.Args[1]
-	if name == "-h" || name == "--help" || name == "help" {
-		usage()
-		return
-	}
-
-	t, ok := tool.Get(name)
-	if !ok {
-		fmt.Fprintf(os.Stderr, "%s: unknown tool %q\n\n", progName, name)
-		usage()
-		os.Exit(1)
-	}
-
-	if err := t.Run(os.Args[2:]); err != nil {
-		fmt.Fprintf(os.Stderr, "%s %s: %v\n", progName, name, err)
-		os.Exit(1)
-	}
-}
-
-func usage() {
-	fmt.Fprintf(os.Stderr, "usage: %s <tool> [flags]\n", progName)
-	fmt.Fprintln(os.Stderr, "\navailable tools:")
-	for _, t := range tool.All() {
-		fmt.Fprintf(os.Stderr, "  %-12s %s\n", t.Name(), t.Summary())
 	}
 }

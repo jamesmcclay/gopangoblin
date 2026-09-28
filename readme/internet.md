@@ -12,6 +12,13 @@ Uses the same SCM credentials as every other tool here — see the main
 tool builds on top of what `internet` configures here (same interfaces,
 zones, and logical router), so run `internet` first if you want SD-WAN too.
 
+Playbooks are parsed with [Viper](https://github.com/spf13/viper) — always
+quote a `serial` (or any other field that's purely digits): unquoted, a
+value like `007954000909285` gets parsed as a number and silently loses
+its leading zeros. See [`habuilder`'s docs](habuilder.md) for the full
+explanation (it also covers Viper's map-key lowercasing, which doesn't
+apply to `internet.yml` since none of its `vars` keys use mixed case).
+
 ## Playbook format (`internet.yml`)
 
 ```yaml
@@ -35,7 +42,7 @@ item_list:
     type: folder                # folder | snippet | firewall
 variable_overrides:
   - name: Lab FW A
-    serial: 007954000891379
+    serial: "007954000891379"
     var_list:
       - name: "$lan_cidr"
         value: "10.0.0.1/24"
@@ -161,14 +168,14 @@ was switched to a standard `policy_type: "Security"` rule with
 
 ```sh
 # See what would change, without calling the SCM API
-pang internet -dry-run
+pang internet --dry-run
 
 # Use the default playbook path (playbooks/internet.yml)
 pang internet
 
 # Point at a different playbook
-pang internet -playbook playbooks/other_internet.yml
+pang internet --playbook playbooks/other_internet.yml
 
 # Run the playbook but skip the automatic push, even if it sets push: true
-pang internet -no-push
+pang internet --no-push
 ```

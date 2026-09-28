@@ -2,10 +2,9 @@ package internet
 
 import (
 	"fmt"
-	"os"
 	"strings"
 
-	"gopkg.in/yaml.v3"
+	"github.com/jamesmcclay/gopangoblin/internal/tool"
 )
 
 // Mode controls how the internet tool reconciles the playbook against SCM.
@@ -331,14 +330,9 @@ func (it Item) Resolve(vars map[string]string) (ResolvedItem, error) {
 
 // LoadPlaybook reads and parses an internet.yml file.
 func LoadPlaybook(path string) (*Playbook, error) {
-	data, err := os.ReadFile(path)
-	if err != nil {
-		return nil, fmt.Errorf("reading playbook: %w", err)
-	}
-
 	var pb Playbook
-	if err := yaml.Unmarshal(data, &pb); err != nil {
-		return nil, fmt.Errorf("parsing playbook: %w", err)
+	if err := tool.LoadYAML(path, &pb); err != nil {
+		return nil, err
 	}
 
 	switch pb.Mode {

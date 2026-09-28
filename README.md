@@ -4,14 +4,18 @@ A Go CLI for running tools related to Palo Alto Networks technologies,
 primarily automating Strata Cloud Manager (SCM) configuration. Each tool
 lives under `internal/<toolname>` with readme documentation under
 `readme/<toolname>` and is registered with the top-level `pang` command 
-(the binary built from this repo).
+(the binary built from this repo). The CLI itself is built on
+[Cobra](https://github.com/spf13/cobra); playbooks are YAML files parsed
+with [Viper](https://github.com/spf13/viper) — see
+[`habuilder`'s docs](readme/habuilder.md) for two Viper quirks (numeric
+strings, mixed-case keys) worth knowing before writing your own playbook.
 
 ## Disclaimer
 
 This is an open-source project, provided as-is with no warranty of
 any kind. Several of these tools (`reset` especially) delete configuration
-and push changes to real firewalls. **Read what a tool does before you run
-it against anything you care about, and use `-dry-run` first.** If you
+and push changes to real firewalls. ⚠️**Read what a tool does before you run
+it against anything you care about, and use `--dry-run` first.** If you
 point this at the wrong tenant, playbook, or firewall and break something,
 that's on you — the author is not responsible for any damage, data loss,
 or downtime caused by using this software.
@@ -86,7 +90,7 @@ pang update
 
 Your `playbooks/` and `secret.txt` are never touched by an update — see
 [`readme/update.md`](readme/update.md) for exactly what gets refreshed and
-the available flags (`-repo`, `-branch`, `-output`).
+the available flags (`--repo`, `--branch`, `--output`).
 
 ## Credentials
 
@@ -96,9 +100,9 @@ credentials), via flags or environment variables:
 
 | Flag              | Env var             | Description                              |
 |-------------------|----------------------|-------------------------------------------|
-| `-client-id`      | `SCM_CLIENT_ID`      | Service account client ID (looks like an email, e.g. `svc@<tsg_id>.iam.panserviceaccount.com`) |
-| `-client-secret`  | `SCM_CLIENT_SECRET`  | Service account client secret            |
-| `-tsg-id`         | `SCM_TSG_ID`         | Tenant Service Group ID (the numeric segment of the client ID's domain) |
+| `--client-id`      | `SCM_CLIENT_ID`      | Service account client ID (looks like an email, e.g. `svc@<tsg_id>.iam.panserviceaccount.com`) |
+| `--client-secret`  | `SCM_CLIENT_SECRET`  | Service account client secret            |
+| `--tsg-id`         | `SCM_TSG_ID`         | Tenant Service Group ID (the numeric segment of the client ID's domain) |
 
 ```sh
 export SCM_CLIENT_ID='service1@12345.iam.panserviceaccount.com'
@@ -113,8 +117,8 @@ export SCM_TSG_ID='12345'
 > `"Error running access token modification plugin"` when requesting a
 > `tsg_id`-scoped token, which is what every SCM config API call requires.
 
-Every one of these tools also supports `-dry-run` (print planned actions
-without calling the SCM API) and `-no-push` (skip the automatic config
+Every one of these tools also supports `--dry-run` (print planned actions
+without calling the SCM API) and `--no-push` (skip the automatic config
 push for one run even if the playbook sets `push: true`).
 
 ## Project layout

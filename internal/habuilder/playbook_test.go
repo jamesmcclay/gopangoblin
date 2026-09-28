@@ -37,22 +37,22 @@ func TestLoadPlaybookResolvesDefaults(t *testing.T) {
 
 func TestResolveFieldExplicitOverride(t *testing.T) {
 	vars := map[string]string{
-		"default_HA1_IP":                 "10.0.0.1",
-		"default_HA2_IP":                 "10.0.0.2",
-		"default_HA_netmask":             "255.255.255.252",
+		"default_ha1_ip":                 "10.0.0.1",
+		"default_ha2_ip":                 "10.0.0.2",
+		"default_ha_netmask":             "255.255.255.252",
 		"default_control_link_interface": "ethernet1/6",
 		"default_data_link_interface":    "ethernet1/7",
-		"default_HA1_data_IP":            "10.0.0.5",
-		"default_HA2_data_IP":            "10.0.0.6",
+		"default_ha1_data_ip":            "10.0.0.5",
+		"default_ha2_data_ip":            "10.0.0.6",
 	}
 	fw := FirewallPair{
 		Name:            "override test",
 		PrimarySerial:   "111",
 		SecondarySerial: "222",
 		PrimaryIP:       "192.0.2.1",           // explicit override, not "vars.*"
-		SecondaryIP:     "vars.default_HA2_IP", // explicit vars reference
+		SecondaryIP:     "vars.default_ha2_ip", // explicit vars reference
 	}
-	r, err := fw.Resolve(vars)
+	r, err := fw.Resolve(vars, nil)
 	if err != nil {
 		t.Fatalf("Resolve: %v", err)
 	}
@@ -70,7 +70,34 @@ func TestResolveMissingRequiredVarErrors(t *testing.T) {
 		PrimarySerial:   "111",
 		SecondarySerial: "222",
 	}
-	if _, err := fw.Resolve(map[string]string{}); err == nil {
+	if _, err := fw.Resolve(map[string]string{}, nil); err == nil {
 		t.Fatal("expected error when no default vars are defined")
+	}
+}
+
+func TestResolveVarNamesOverride(t *testing.T) {
+	vars := map[string]string{
+		"custom_primary_ip":              "192.0.2.5",
+		"default_ha2_ip":                 "198.51.100.1",
+		"default_ha_netmask":             "255.255.255.252",
+		"default_ha1_data_ip":            "10.0.0.5",
+		"default_ha2_data_ip":            "10.0.0.6",
+		"default_control_link_interface": "ethernet1/6",
+		"default_data_link_interface":    "ethernet1/7",
+	}
+	varNames := map[string]string{
+		"primary_ip": "custom_primary_ip",
+	}
+	fw := FirewallPair{
+		Name:            "var_names override",
+		PrimarySerial:   "111",
+		SecondarySerial: "222",
+	}
+	r, err := fw.Resolve(vars, varNames)
+	if err != nil {
+		t.Fatalf("Resolve: %v", err)
+	}
+	if r.PrimaryIP != "192.0.2.5" {
+		t.Errorf("PrimaryIP = %q, want value from var_names-selected key", r.PrimaryIP)
 	}
 }

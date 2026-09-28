@@ -5,44 +5,39 @@
 package update
 
 import (
-	"flag"
 	"fmt"
 	"runtime"
+
+	"github.com/spf13/cobra"
 
 	"github.com/jamesmcclay/gopangoblin/internal/tool"
 )
 
 func init() {
-	tool.Register(&Tool{})
+	var repo, branch, output string
+	cmd := &cobra.Command{
+		Use:   "update",
+		Short: "Pull the latest gopangoblin source from GitHub and rebuild",
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return run(repo, branch, output)
+		},
+	}
+	cmd.Flags().StringVar(&repo, "repo", defaultRepo, "GitHub repo URL to update from")
+	cmd.Flags().StringVar(&branch, "branch", "main", "branch to pull")
+	cmd.Flags().StringVar(&output, "output", defaultOutputName(), "path to write the rebuilt binary to")
+	tool.Register(cmd)
 }
 
 const defaultRepo = "https://github.com/jamesmcclay/gopangoblin"
 
-// Tool is the "update" gopangoblin tool.
-type Tool struct{}
-
-func (t *Tool) Name() string { return "update" }
-
-func (t *Tool) Summary() string {
-	return "Pull the latest gopangoblin source from GitHub and rebuild"
-}
-
-func (t *Tool) Run(args []string) error {
-	fs := flag.NewFlagSet("update", flag.ExitOnError)
-	repo := fs.String("repo", defaultRepo, "GitHub repo URL to update from")
-	branch := fs.String("branch", "main", "branch to pull")
-	output := fs.String("output", defaultOutputName(), "path to write the rebuilt binary to")
-	if err := fs.Parse(args); err != nil {
-		return err
-	}
-
+func run(repo, branch, output string) error {
 	root, err := findRepoRoot(".")
 	if err != nil {
 		return err
 	}
 	fmt.Printf("update: repo root %s\n", root)
 
-	zipURL := fmt.Sprintf("%s/archive/refs/heads/%s.zip", *repo, *branch)
+	zipURL := fmt.Sprintf("%s/archive/refs/heads/%s.zip", repo, branch)
 	fmt.Printf("update: downloading %s\n", zipURL)
 	zipPath, err := downloadToTemp(zipURL)
 	if err != nil {
@@ -62,12 +57,12 @@ func (t *Tool) Run(args []string) error {
 		return fmt.Errorf("syncing source: %w", err)
 	}
 
-	fmt.Printf("update: building %s\n", *output)
-	if err := build(root, *output); err != nil {
+	fmt.Printf("update: building %s\n", output)
+	if err := build(root, output); err != nil {
 		return fmt.Errorf("building: %w", err)
 	}
 
-	fmt.Printf("update: rebuilt %s from %s@%s\n", *output, *repo, *branch)
+	fmt.Printf("update: rebuilt %s from %s@%s\n", output, repo, branch)
 	return nil
 }
 

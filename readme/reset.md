@@ -15,6 +15,13 @@ SCM registration, the folder/snippet objects themselves, or any device's
 Uses the same SCM credentials as every other tool here — see the main
 [README's Credentials section](../README.md#credentials).
 
+Playbooks are parsed with [Viper](https://github.com/spf13/viper) — always
+quote a `serial` (or any other field that's purely digits): unquoted, a
+value like `007954000909285` gets parsed as a number and silently loses
+its leading zeros. See [`habuilder`'s docs](habuilder.md) for the full
+explanation (it also covers Viper's map-key lowercasing, which doesn't
+apply to `reset.yml` since it has no `vars`).
+
 ## Playbook format (`reset.yml`)
 
 ```yaml
@@ -22,9 +29,9 @@ name: JamesTheGreat's Reset Firewalls
 push: true                  # push device wipes to the firewalls automatically
 fw_list:
   - name: James Lab A
-    serial: 12345
+    serial: "12345"
   - name: James Lab B
-    serial: 67890
+    serial: "67890"
 folder_list:
   # Hub/Branches (or whatever device folders your hub_list/branch_list
   # devices actually live in) must come before the folder sdwan.yml
@@ -41,7 +48,7 @@ snippet_list:
 
 - **push** — same semantics as habuilder: after wiping, automatically push
   the candidate config to every device actually affected this run.
-  Override with `-no-push` for one run. Push only knows how to target
+  Override with `--no-push` for one run. Push only knows how to target
   devices, but wiping a folder or snippet changes the candidate config for
   every device that inherits from it, not just devices listed in
   `fw_list` — so `reset` works out which devices those are (by walking
@@ -197,14 +204,14 @@ a possible future addition rather than half-implemented here.
 
 ```sh
 # See what would be removed, without calling the SCM API
-pang reset -dry-run
+pang reset --dry-run
 
 # Use the default playbook path (playbooks/reset.yml)
 pang reset
 
 # Point at a different playbook
-pang reset -playbook playbooks/other_reset.yml
+pang reset --playbook playbooks/other_reset.yml
 
 # Run the playbook but skip the automatic push, even if it sets push: true
-pang reset -no-push
+pang reset --no-push
 ```
