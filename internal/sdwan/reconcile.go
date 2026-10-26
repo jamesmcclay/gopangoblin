@@ -1008,8 +1008,8 @@ func (r *reconciler) installSDWANRule(spec sdwanRuleSpec, pathQualityProfile str
 	target := sdwanRuleTarget(r.folder, spec, pathQualityProfile)
 
 	return r.reconcileNamed(spec.name, fmt.Sprintf("SD-WAN rule %q", spec.name), existing,
-		func() error { _, err := r.client.CreateSDWANRule(target); return err },
-		func(id string) error { _, err := r.client.UpdateSDWANRule(id, target); return err },
+		func() error { _, err := r.client.CreateSDWANRule(target, "pre"); return err },
+		func(id string) error { _, err := r.client.UpdateSDWANRule(id, target, "pre"); return err },
 		func(id string) error { return deleteIgnoreNotFound(r.client, scm.SDWANRulesPath, id) },
 	)
 }
@@ -1019,7 +1019,10 @@ func (r *reconciler) installSDWANRule(spec sdwanRuleSpec, pathQualityProfile str
 // see reconcileInternetRouting's doc comment on wantSharedLocalRule for why
 // this needs to exist exclusively at each hub's own device folder under
 // InternetRoutingBackhaul, instead of the shared scope every device
-// inherits from.
+// inherits from. Create/update passes position "pre" explicitly -- see
+// scm.Client.CreateSDWANRule's doc comment for why a device-group-mapped
+// folder (unlike r.folder's own top-level shared one) needs that spelled
+// out rather than relying on the same implicit default.
 func (r *reconciler) installLocalBreakoutRuleAt(folder string, spec sdwanRuleSpec, pathQualityProfile string, want bool) error {
 	existing, err := r.findOwnedInFolder(scm.SDWANRulesPath, folder, spec.name, "")
 	if err != nil {
@@ -1027,8 +1030,8 @@ func (r *reconciler) installLocalBreakoutRuleAt(folder string, spec sdwanRuleSpe
 	}
 	target := sdwanRuleTarget(folder, spec, pathQualityProfile)
 	return r.reconcileToggled(fmt.Sprintf("SD-WAN rule %q at folder %q", spec.name, folder), want, existing,
-		func() error { _, err := r.client.CreateSDWANRule(target); return err },
-		func(id string) error { _, err := r.client.UpdateSDWANRule(id, target); return err },
+		func() error { _, err := r.client.CreateSDWANRule(target, "pre"); return err },
+		func(id string) error { _, err := r.client.UpdateSDWANRule(id, target, "pre"); return err },
 		func(id string) error { return deleteIgnoreNotFound(r.client, scm.SDWANRulesPath, id) },
 	)
 }
@@ -1301,34 +1304,55 @@ func (r *reconciler) reconcileInternetRouting(pl *Resolved) error {
 	}
 	localTarget := sdwanRuleTarget(r.folder, localSpec, pl.PathQualityProfile)
 	if err := r.reconcileToggled(fmt.Sprintf("SD-WAN rule %q", localSpec.name), wantSharedLocalRule, existingLocalRule,
-		func() error { _, err := r.client.CreateSDWANRule(localTarget); return err },
-		func(id string) error { _, err := r.client.UpdateSDWANRule(id, localTarget); return err },
+		func() error { _, err := r.client.CreateSDWANRule(localTarget, "pre"); return err },
+		func(id string) error { _, err := r.client.UpdateSDWANRule(id, localTarget, "pre"); return err },
 		func(id string) error { return deleteIgnoreNotFound(r.client, scm.SDWANRulesPath, id) },
 	); err != nil {
 		return fmt.Errorf("internet-traffic sdwan rule: %w", err)
 	}
-	for _, folder := range uniqueDeviceFolders(r.deviceFolders, pl.Hubs) {
-		if err := r.installLocalBreakoutRuleAt(folder, localSpec, pl.PathQualityProfile, wantBackhaul); err != nil {
-			return fmt.Errorf("hub folder %q: %w", folder, err)
-		}
-	}
 
-	// Ordering depends on direction: creating the hub router override
-	// references the redistribution profile by name (must exist first),
-	// but removing it must happen in the opposite order -- confirmed live,
-	// deleting the profile while a router override still references it
-	// fails with a 409 "NON_ZERO_REFS" from SCM.
+	// Ordering depends on direction. Two separate constraints both apply,
+	// and both only bind one way around:
+	//   - the hub router override references the redistribution profile by
+	//     name, so creating it requires the profile to already exist, but
+	//     removing the profile while an override still references it fails
+	//     with a 409 "NON_ZERO_REFS" from SCM -- confirmed live.
+	//   - the hub-folder SD-WAN rule override requires the hub-folder
+	//     router override to already exist: confirmed live (the hard way),
+	//     creating the rule at a hub folder with no router object owned
+	//     there yet 400s with "Could not find schema node for xpath
+	//     .../container/entry[@name='Hub']/rulebase/sdwan/rules/entry[...]"
+	//     -- SCM/PAN-OS apparently never materializes a folder's own
+	//     rulebase schema node until some network object (here, the
+	//     logical-router override) is owned directly there. Removing the
+	//     rule before the router override, the reverse of creation order,
+	//     is untested but costs nothing and mirrors the profile/override
+	//     pair's own reasoning.
 	if wantBackhaul {
 		if err := r.installRedistributionProfile(hubDefaultRedistributionProfileName, wantBackhaul, true, true); err != nil {
 			return fmt.Errorf("hub redistribution profile: %w", err)
 		}
-	}
-	for _, folder := range uniqueDeviceFolders(r.deviceFolders, pl.Hubs) {
-		if err := r.installHubBackhaulRedistribution(pl.Router, folder, pl, hubDefaultRedistributionProfileName, wantBackhaul); err != nil {
-			return fmt.Errorf("hub folder %q: %w", folder, err)
+		for _, folder := range uniqueDeviceFolders(r.deviceFolders, pl.Hubs) {
+			if err := r.installHubBackhaulRedistribution(pl.Router, folder, pl, hubDefaultRedistributionProfileName, wantBackhaul); err != nil {
+				return fmt.Errorf("hub folder %q: %w", folder, err)
+			}
 		}
-	}
-	if !wantBackhaul {
+		for _, folder := range uniqueDeviceFolders(r.deviceFolders, pl.Hubs) {
+			if err := r.installLocalBreakoutRuleAt(folder, localSpec, pl.PathQualityProfile, wantBackhaul); err != nil {
+				return fmt.Errorf("hub folder %q: %w", folder, err)
+			}
+		}
+	} else {
+		for _, folder := range uniqueDeviceFolders(r.deviceFolders, pl.Hubs) {
+			if err := r.installLocalBreakoutRuleAt(folder, localSpec, pl.PathQualityProfile, wantBackhaul); err != nil {
+				return fmt.Errorf("hub folder %q: %w", folder, err)
+			}
+		}
+		for _, folder := range uniqueDeviceFolders(r.deviceFolders, pl.Hubs) {
+			if err := r.installHubBackhaulRedistribution(pl.Router, folder, pl, hubDefaultRedistributionProfileName, wantBackhaul); err != nil {
+				return fmt.Errorf("hub folder %q: %w", folder, err)
+			}
+		}
 		if err := r.installRedistributionProfile(hubDefaultRedistributionProfileName, wantBackhaul, true, true); err != nil {
 			return fmt.Errorf("hub redistribution profile: %w", err)
 		}

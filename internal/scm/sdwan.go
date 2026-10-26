@@ -1,5 +1,7 @@
 package scm
 
+import "net/url"
+
 // This file covers the SD-WAN-specific SCM resources confirmed live against
 // the lab tenant's manually-built PAN-OS SD-WAN deployment (see
 // conversation.md / instructions.md in the repo root): SD-WAN interface
@@ -173,20 +175,48 @@ type SDWANRule struct {
 	Action             SDWANRuleAction `json:"action"`
 }
 
-func (c *Client) CreateSDWANRule(cfg SDWANRule) (*SDWANRule, error) {
+// CreateSDWANRule creates cfg. position ("pre"/"post", matching
+// ListByScope's own param) must be passed as an explicit query param --
+// confirmed live against a folder that had zero sdwan-rules left in it
+// (every one deleted, e.g. by "reset"): the folder's own
+// rulebase/sdwan/rules schema node is apparently torn down once the last
+// rule under it is removed, and a create with no position specified then
+// 400s with "Could not find schema node for xpath .../rulebase/sdwan/
+// rules/entry[...]", unable to say which of pre/post to re-materialize.
+// A folder that already has at least one sdwan-rule in that position
+// tolerates an unspecified position on later creates (the node already
+// exists), which is why this went unnoticed until a genuinely empty
+// folder -- any folder, top-level or device-group-mapped alike -- was
+// created into for the first time. Callers should simply always pass
+// "pre" or "post" rather than relying on that pre-existing-node case.
+func (c *Client) CreateSDWANRule(cfg SDWANRule, position string) (*SDWANRule, error) {
 	var out SDWANRule
-	if err := c.doJSON("POST", SDWANRulesPath, nil, cfg, &out); err != nil {
+	if err := c.doJSON("POST", SDWANRulesPath, positionQuery(position), cfg, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
 }
 
-func (c *Client) UpdateSDWANRule(id string, cfg SDWANRule) (*SDWANRule, error) {
+// UpdateSDWANRule is CreateSDWANRule's update counterpart -- see its doc
+// comment for why position matters for a device-group-mapped folder.
+func (c *Client) UpdateSDWANRule(id string, cfg SDWANRule, position string) (*SDWANRule, error) {
 	var out SDWANRule
-	if err := c.doJSON("PUT", SDWANRulesPath+"/"+id, nil, cfg, &out); err != nil {
+	if err := c.doJSON("PUT", SDWANRulesPath+"/"+id, positionQuery(position), cfg, &out); err != nil {
 		return nil, err
 	}
 	return &out, nil
+}
+
+// positionQuery builds the "position" query param ListByScope already
+// sends for GET, returning nil (no query string at all) when position is
+// empty so an unaffected caller's request is byte-identical to before.
+func positionQuery(position string) url.Values {
+	if position == "" {
+		return nil
+	}
+	q := url.Values{}
+	q.Set("position", position)
+	return q
 }
 
 // AutoVPNClustersPath is the base path for the /auto-vpn-clusters resource:
