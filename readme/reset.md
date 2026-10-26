@@ -48,7 +48,11 @@ snippet_list:
 
 - **push** — same semantics as habuilder: after wiping, automatically push
   the candidate config to every device actually affected this run.
-  Override with `--no-push` for one run. Push only knows how to target
+  Override with `--no-push` for one run, or `--push` to force it on for
+  one run if the playbook sets `push: false` (`reset` has no `mode`
+  concept, so a `--mode` flag is accepted on its command line too, for
+  consistency with the other tools, but it's silently ignored). Push only
+  knows how to target
   devices, but wiping a folder or snippet changes the candidate config for
   every device that inherits from it, not just devices listed in
   `fw_list` — so `reset` works out which devices those are (by walking
@@ -203,23 +207,30 @@ a possible future addition rather than half-implemented here.
 ## Example commands
 
 ```sh
-# See what would be removed, without calling the SCM API
+# Dry-run is the default -- see what would be removed, without calling
+# the SCM API, with no flag needed at all (see the main README's
+# Credentials section for how to change this default via shared.yml, and
+# for the confirmation prompt a real run asks for)
+pang reset
+
+# Same as above, explicitly
 pang reset --dry-run
 
-# Use the default playbook path (playbooks/reset.yml)
-pang reset
+# Actually apply it -- prompts for a typed "yes" unless shared.yml sets
+# auto_apply: true
+pang reset --dry-run=false
 
 # Point at a different playbook
 pang reset --playbook playbooks/other_reset.yml
 
-# Pass credentials as flags instead of env vars
+# Pass credentials as flags instead of env vars/shared.yml
 pang reset \
   --client-id 'service1@12345.iam.panserviceaccount.com' \
   --client-secret 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' \
   --tsg-id '12345'
 
 # Run the playbook but skip the automatic push, even if it sets push: true
-pang reset --no-push
+pang reset --dry-run=false --no-push
 
 # See all available flags
 pang reset -h

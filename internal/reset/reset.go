@@ -8,6 +8,7 @@
 package reset
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"time"
@@ -43,6 +44,9 @@ func run(flags *tool.SCMFlags) error {
 	pb, err := LoadPlaybook(flags.Playbook)
 	if err != nil {
 		return err
+	}
+	if flags.Changed("push") {
+		pb.Push = flags.Push
 	}
 
 	fws, err := pb.Resolved()
@@ -116,63 +120,92 @@ func run(flags *tool.SCMFlags) error {
 	fmt.Printf("reset: playbook %q, %d device(s), %d folder(s), %d snippet(s), global=%v\n",
 		pb.Name, len(fws), len(resolvedFolders), len(resolvedSnippets), wantGlobal)
 
-	var failures int
-
-	// Global runs first, before anything folder/snippet/device-scoped:
-	// an Auto VPN cluster names ethernet-interfaces/logical-routers/
+	// Global is attempted first, before anything folder/snippet/device
+	// scoped: an Auto VPN cluster names ethernet-interfaces/logical-routers/
 	// sdwan-interface-profiles by reference, and SCM enforces that
 	// referential integrity on delete -- confirmed live, running this
 	// after the folder wipe left scm_router, both WAN interfaces, and
 	// both sdwan-interface-profiles permanently stuck 409ing against
 	// "still referenced" while the cluster naming them was still alive.
 	// Removing the cluster first can only ever reduce what's referenced
-	// elsewhere, never add to it, so it's always safe to do first
+	// elsewhere, never add to it, so trying it first is always safe
 	// regardless of what else this playbook targets.
 	//
-	// A failure here is fatal to the whole run, not just counted and
-	// continued past: confirmed live, SCM occasionally 403s a cluster
-	// delete transiently (retrying the exact same call seconds later with
-	// no code change succeeds) -- but every later folder/device wipe
-	// assumes the cluster is already gone, so pressing on regardless
-	// cascades into a wall of confusing "still referenced" 409 deadlocks
-	// that don't actually explain the root cause, and still attempts a
-	// final push against a half-wiped, referentially-inconsistent
-	// candidate config, which was observed to hang and time out rather
-	// than fail cleanly. Stopping here instead leaves candidate config
-	// exactly as before (nothing else was touched yet), so simply
-	// re-running reset is the correct recovery -- as seen live, a
-	// transient failure here typically succeeds on retry.
+	// But the dependency isn't guaranteed to only run that direction: a
+	// manually-created link-tags object living inside a folder's
+	// sdwan-traffic-distribution profile can itself be named by the
+	// cluster, which blocks the cluster's own delete with a 409 until
+	// that folder is wiped -- confirmed live, "james-cluster" stuck
+	// referencing "Branches -> ... -> link-tags -> DIA", a link tag
+	// reset's own folder wipe goes on to remove. So a 409 here isn't
+	// treated as fatal: it's retried below, in the same round-based
+	// fashion deleteCandidates already uses for objects within one scope,
+	// just one level up across Global/device/folder/snippet targets --
+	// each round runs every target still pending, anything that comes
+	// back with a conflict is retried next round, and the loop stops
+	// once a round makes no further progress. Any other error (e.g. a
+	// transient 403, or a genuine listing/API failure) is not retried
+	// and is counted as a normal failure instead, matching how
+	// device/folder/snippet reconcile failures were always handled.
+	type reconcileTask struct {
+		label string
+		run   func() error
+	}
+
+	var tasks []reconcileTask
 	if wantGlobal {
-		if err := r.reconcileGlobal(); err != nil {
-			return fmt.Errorf("Global: %w -- aborting before any folder/device/snippet wipe or push (see reset.go's Run comment)", err)
-		}
+		tasks = append(tasks, reconcileTask{label: "Global", run: r.reconcileGlobal})
 	}
-
 	for _, fw := range fws {
-		device, err := scm.ResolveDeviceBySerial(devices, fw.Serial)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "reset: %s: %v\n", fw.Name, err)
-			failures++
-			continue
-		}
-		if err := r.reconcileDevice(device, fw); err != nil {
-			fmt.Fprintf(os.Stderr, "reset: %s: %v\n", fw.Name, err)
-			failures++
-		}
+		tasks = append(tasks, reconcileTask{
+			label: fw.Name,
+			run: func() error {
+				device, err := scm.ResolveDeviceBySerial(devices, fw.Serial)
+				if err != nil {
+					return err
+				}
+				return r.reconcileDevice(device, fw)
+			},
+		})
 	}
-
 	for _, f := range resolvedFolders {
-		if err := r.reconcileFolder(f); err != nil {
-			fmt.Fprintf(os.Stderr, "reset: folder %s: %v\n", f.Name, err)
-			failures++
-		}
+		tasks = append(tasks, reconcileTask{label: fmt.Sprintf("folder %s", f.Name), run: func() error { return r.reconcileFolder(f) }})
+	}
+	for _, s := range resolvedSnippets {
+		tasks = append(tasks, reconcileTask{label: fmt.Sprintf("snippet %s", s.Name), run: func() error { return r.reconcileSnippet(s) }})
 	}
 
-	for _, s := range resolvedSnippets {
-		if err := r.reconcileSnippet(s); err != nil {
-			fmt.Fprintf(os.Stderr, "reset: snippet %s: %v\n", s.Name, err)
+	var failures int
+	pending := tasks
+	for len(pending) > 0 {
+		var retry []reconcileTask
+		conflicts := map[string]error{}
+		for _, t := range pending {
+			err := t.run()
+			if err == nil {
+				continue
+			}
+			if isUnresolvedConflict(err) {
+				retry = append(retry, t)
+				conflicts[t.label] = err
+				continue
+			}
+			fmt.Fprintf(os.Stderr, "reset: %s: %v\n", t.label, err)
 			failures++
 		}
+		if len(retry) == 0 {
+			break
+		}
+		if len(retry) == len(pending) {
+			// A whole round made zero progress: a genuine cross-scope
+			// cycle, not just an ordering issue retries can resolve.
+			for _, t := range retry {
+				fmt.Fprintf(os.Stderr, "reset: %s: still referenced by other config even after every other target was wiped: %v\n", t.label, conflicts[t.label])
+				failures++
+			}
+			break
+		}
+		pending = retry
 	}
 
 	touched := r.touchedSerials()
@@ -195,6 +228,19 @@ func run(flags *tool.SCMFlags) error {
 		return fmt.Errorf("%d device(s) failed, see above", failures)
 	}
 	return nil
+}
+
+// isUnresolvedConflict reports whether err is the "could not delete ...
+// still referenced by other config" error deleteCandidates returns once a
+// whole retry round makes zero progress on a 409 -- i.e. a dependency on
+// something outside the scope just reconciled, which another target in
+// this run's task list may well remove. DeleteByID's own conflicts are
+// always retried internally first (see deleteCandidates), so any
+// *scm.APIError reaching here is either this still-stuck 409 or some
+// unrelated status code that isn't worth retrying across scopes.
+func isUnresolvedConflict(err error) bool {
+	var apiErr *scm.APIError
+	return errors.As(err, &apiErr) && scm.IsConflict(apiErr)
 }
 
 // resolveFolders matches each folder_list entry to a real SCM folder by

@@ -21,7 +21,7 @@ import (
 func main() {
 	root := &cobra.Command{
 		Use:           filepath.Base(os.Args[0]),
-		Short:         "Tools for Palo Alto Networks Strata Cloud Manager automation",
+		Short:         "Tools for Palo Alto Networks Strata Cloud Manager automation. Created by the famous and genius developer, James McClay.",
 		SilenceUsage:  true,
 		SilenceErrors: true,
 	}

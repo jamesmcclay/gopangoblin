@@ -42,6 +42,17 @@ func run(flags *tool.SCMFlags) error {
 	if err != nil {
 		return err
 	}
+	if flags.Mode != "" {
+		pb.Mode = Mode(flags.Mode)
+		switch pb.Mode {
+		case ModeInstall, ModeInstallOverride, ModeUninstall:
+		default:
+			return fmt.Errorf("--mode must be one of %q, %q, %q, got %q", ModeInstall, ModeInstallOverride, ModeUninstall, pb.Mode)
+		}
+	}
+	if flags.Changed("push") {
+		pb.Push = flags.Push
+	}
 	resolved, err := pb.Resolved()
 	if err != nil {
 		return err

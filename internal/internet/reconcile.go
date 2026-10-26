@@ -879,6 +879,16 @@ func (r *reconciler) ensureDefaultRoute(scopeParam, scopeValue, folder, snippet,
 		return err
 	}
 	if source == nil {
+		if r.dryRun {
+			// Not a real gap: ensureInterfaceRouted (called just before
+			// this, for the same interface) skips its own create/update
+			// under dry-run too, so there's no real router yet for this
+			// lookup to find -- confirmed live, this is exactly what
+			// broke a from-scratch dry-run against a freshly reset
+			// tenant. A real run creates the router first, so this
+			// lookup succeeds there the same way it always has.
+			return nil
+		}
 		return fmt.Errorf("internal error: interface %q should already be routed", ifaceName)
 	}
 	sourceVRF := vrfContaining(source.VRF, ifaceName)

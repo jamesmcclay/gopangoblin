@@ -15,10 +15,13 @@ strings, mixed-case keys) worth knowing before writing your own playbook.
 This is an open-source project, provided as-is with no warranty of
 any kind. Several of these tools (`reset` especially) delete configuration
 and push changes to real firewalls. ⚠️**Read what a tool does before you run
-it against anything you care about, and use `--dry-run` first.** If you
-point this at the wrong tenant, playbook, or firewall and break something,
-that's on you — the author is not responsible for any damage, data loss,
-or downtime caused by using this software.
+it against anything you care about.** Every tool defaults to `--dry-run`
+and asks you to type `yes` before it ever does anything for real (see
+"Credentials" below) — but that's a safety net, not a substitute for
+reading the playbook you're about to run. If you point this at the wrong
+tenant, playbook, or firewall and break something, that's on you — the
+author is not responsible for any damage, data loss, or downtime caused by
+using this software.
 
 ## Tools
 
@@ -88,7 +91,7 @@ current source from GitHub and rebuilds) without needing a `git` checkout:
 pang update
 ```
 
-Your `playbooks/` and `secret.txt` are never touched by an update — see
+Your `playbooks/` are never touched by an update — see
 [`readme/update.md`](readme/update.md) for exactly what gets refreshed and
 the available flags (`--repo`, `--branch`, `--output`).
 
@@ -138,9 +141,57 @@ skipped.
 > `"Error running access token modification plugin"` when requesting a
 > `tsg_id`-scoped token, which is what every SCM config API call requires.
 
-Every one of these tools also supports `--dry-run` (print planned actions
-without calling the SCM API) and `--no-push` (skip the automatic config
-push for one run even if the playbook sets `push: true`).
+### `--dry-run` and confirmation
+
+Every one of these four tools defaults `--dry-run` to **true** — it prints
+what it would do without calling the SCM API at all, unless you say
+otherwise. To actually apply a playbook, either pass `--dry-run=false` for
+one run, or flip the default off in `shared.yml`:
+
+```yaml
+dry_run: false   # every run is real unless --dry-run is passed explicitly
+```
+
+Whenever a run is going to be real (`--dry-run=false`, or `dry_run: false`
+in `shared.yml`), the tool stops and asks:
+
+```
+This will make changes to your environment, you assume all risk. Do you want to proceed? (type "yes" to continue):
+```
+
+You have to type `yes` exactly (anything else, including just pressing
+enter, aborts before touching SCM) — **unless** `shared.yml` sets:
+
+```yaml
+auto_apply: true
+```
+
+There's deliberately no `--auto-apply` flag — this is meant to be a
+considered, written-down opt-in for something like a CI pipeline, not a
+flag you reach for to get past the prompt on one risky run.
+
+`--no-push` is independent of all of this: even a real (non-dry-run) run
+still only pushes the resulting candidate config to devices if the
+playbook sets `push: true` and `--no-push` isn't passed.
+
+### `--mode` and `--push`: overriding the playbook without editing it
+
+`habuilder`, `internet`, and `sdwan` also accept `--mode` (`install` |
+`install-override` | `uninstall`), overriding the playbook's own `mode:`
+for this run only:
+
+```sh
+pang internet --mode=uninstall
+```
+
+`--push` (distinct from `--no-push` above) overrides the playbook's own
+`push:` setting the same way — `--push` forces it on for this run even if
+the playbook sets `push: false`.
+
+Both are genuinely optional per tool: `reset` has no `mode` concept at
+all (`reset.yml` has no `mode:` field — it just wipes whatever's listed),
+so `--mode` is accepted on its command line but silently has no effect
+there; every tool does understand `push`.
 
 ## Project layout
 
@@ -157,7 +208,7 @@ playbooks/habuilder.yml         Example/working habuilder playbook
 playbooks/reset.yml             Example/working reset playbook
 playbooks/internet.yml          Example/working internet playbook
 playbooks/sdwan.yml             Example/working sdwan playbook
-playbooks/shared.yml            Optional -- client_id/client_secret/tsg_id, see Credentials above
+playbooks/shared.yml            Optional -- client_id/client_secret/tsg_id/dry_run/auto_apply, see Credentials above
 readme/                         Per-tool documentation
 ```
 

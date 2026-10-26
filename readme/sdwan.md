@@ -72,7 +72,9 @@ branch_list:
     asn: "65003"
 ```
 
-- **mode** — `install` creates only what's missing (skips anything already
+- **mode** — overridable for one run with `--mode` on the command line
+  (e.g. `--mode=uninstall`), without editing the playbook. `install`
+  creates only what's missing (skips anything already
   present); `install-override` re-asserts every object regardless of
   current state, including wholesale-replacing the Auto VPN cluster's
   hub/branch membership with exactly what `hub_list`/`branch_list`
@@ -299,23 +301,33 @@ hub-folder `internet-traffic` override) will block deletion of the shared
 ## Example commands
 
 ```sh
-# See what would change, without calling the SCM API
+# Dry-run is the default -- see what would change, without calling the
+# SCM API, with no flag needed at all (see the main README's Credentials
+# section for how to change this default via shared.yml, and for the
+# confirmation prompt a real run asks for)
+pang sdwan
+
+# Same as above, explicitly
 pang sdwan --dry-run
 
-# Use the default playbook path (playbooks/sdwan.yml)
-pang sdwan
+# Actually apply it -- prompts for a typed "yes" unless shared.yml sets
+# auto_apply: true
+pang sdwan --dry-run=false
 
 # Point at a different playbook
 pang sdwan --playbook playbooks/other_sdwan.yml
 
-# Pass credentials as flags instead of env vars
+# Override mode/push for this run without editing the playbook file
+pang sdwan --dry-run=false --mode=uninstall --push
+
+# Pass credentials as flags instead of env vars/shared.yml
 pang sdwan \
   --client-id 'service1@12345.iam.panserviceaccount.com' \
   --client-secret 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' \
   --tsg-id '12345'
 
 # Run the playbook but skip the automatic push, even if it sets push: true
-pang sdwan --no-push
+pang sdwan --dry-run=false --no-push
 
 # See all available flags
 pang sdwan -h
@@ -325,8 +337,9 @@ pang help
 ```
 
 To tear down just the SD-WAN layer (leaving `internet`'s base config in
-place), set `mode: uninstall` in the playbook and run `pang sdwan` again —
-or use [`reset`](reset.md) with `Global` plus the hub/branch device
+place), run `pang sdwan --dry-run=false --mode=uninstall` (or set
+`mode: uninstall` in the playbook itself and run `pang sdwan --dry-run=false`)
+— or use [`reset`](reset.md) with `Global` plus the hub/branch device
 folders in `folder_list` (see "What gets created" above) to remove
 everything, including the Auto VPN cluster, tenant-wide alongside
 everything else.

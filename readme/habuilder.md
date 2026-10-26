@@ -27,7 +27,7 @@ fw_list:
     secondary_serial: "67890"
 ```
 
-- **mode**
+- **mode** — overridable for one run with `--mode` on the command line (e.g. `--mode=uninstall`), without editing the playbook.
   - `install` — create HA config only for devices that don't already have one; existing configs are left untouched.
   - `install-override` — create or update HA config for every device in `fw_list`, regardless of current state.
   - `uninstall` — remove HA config from every device in `fw_list`.
@@ -43,28 +43,38 @@ fw_list:
     primary_ip: my_ha1_addr   # fw_list entries with no primary_ip now default to vars.my_ha1_addr
   ```
   Recognized keys: `primary_ip`, `secondary_ip`, `netmask`, `primary_data_ip`, `secondary_data_ip`, `control_link_interface`, `data_link_interface`, `group_id`. Any left out of `var_names` keep their built-in default name. Write values here lowercase too, for the same reason as `vars` keys above.
-- **push** (top-level, default `false`) — after reconciling, automatically push the candidate configuration to every device that was actually created, updated, or deleted this run (SCM config API changes land in the candidate config and otherwise sit un-deployed until pushed, e.g. from the SCM UI, by some other automation, or an operator manually running "Push Config"). Devices left untouched (e.g. `[skip]`ped in `install` mode) are never included in the push. Pushing is a single `CommitAndPush` job covering all touched devices; habuilder waits for that job to finish and reports success or failure. Override with `--no-push` on the command line to skip it for one run without editing the playbook.
+- **push** (top-level, default `false`) — after reconciling, automatically push the candidate configuration to every device that was actually created, updated, or deleted this run (SCM config API changes land in the candidate config and otherwise sit un-deployed until pushed, e.g. from the SCM UI, by some other automation, or an operator manually running "Push Config"). Devices left untouched (e.g. `[skip]`ped in `install` mode) are never included in the push. Pushing is a single `CommitAndPush` job covering all touched devices; habuilder waits for that job to finish and reports success or failure. Override with `--no-push` on the command line to skip it for one run without editing the playbook, or `--push` to force it on for one run if the playbook sets `push: false`.
 
 ## Example commands
 
 ```sh
-# See what would change, without calling the SCM API (safe against a live tenant)
+# Dry-run is the default -- see what would change, without calling the
+# SCM API, with no flag needed at all (see the main README's Credentials
+# section for how to change this default via shared.yml, and for the
+# confirmation prompt a real run asks for)
+pang habuilder
+
+# Same as above, explicitly
 pang habuilder --dry-run
 
-# Use the default playbook path (playbooks/habuilder.yml)
-pang habuilder
+# Actually apply it -- prompts for a typed "yes" unless shared.yml sets
+# auto_apply: true
+pang habuilder --dry-run=false
 
 # Point at a different playbook
 pang habuilder --playbook playbooks/other_pairs.yml
 
-# Pass credentials as flags instead of env vars
+# Override mode/push for this run without editing the playbook file
+pang habuilder --dry-run=false --mode=uninstall --push
+
+# Pass credentials as flags instead of env vars/shared.yml
 pang habuilder \
   --client-id 'service1@12345.iam.panserviceaccount.com' \
   --client-secret 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' \
   --tsg-id '12345'
 
 # Run the playbook but skip the automatic push, even if it sets push: true
-pang habuilder --no-push
+pang habuilder --dry-run=false --no-push
 
 # See all available flags
 pang habuilder -h

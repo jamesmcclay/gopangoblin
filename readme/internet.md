@@ -56,11 +56,13 @@ variable_overrides:
         value: "192.168.123.1"
 ```
 
-- **mode** — `install` configures only targets missing internet access
-  (every piece below is checked, not just the untrust interface, so a
-  partially-completed prior run can still be finished); `install-override`
-  reconfigures every target regardless of current state; `uninstall`
-  removes everything this tool created.
+- **mode** — overridable for one run with `--mode` on the command line
+  (e.g. `--mode=uninstall`), without editing the playbook. `install`
+  configures only targets missing internet access (every piece below is
+  checked, not just the untrust interface, so a partially-completed prior
+  run can still be finished); `install-override` reconfigures every
+  target regardless of current state; `uninstall` removes everything this
+  tool created.
 - **item_list** — each entry's `type` is `folder`, `snippet`, or
   `firewall`. A `firewall` entry needs `serial` (its own field — `name` is
   just a display label for all three types, not looked up in SCM).
@@ -167,23 +169,33 @@ was switched to a standard `policy_type: "Security"` rule with
 ## Example commands
 
 ```sh
-# See what would change, without calling the SCM API
+# Dry-run is the default -- see what would change, without calling the
+# SCM API, with no flag needed at all (see the main README's Credentials
+# section for how to change this default via shared.yml, and for the
+# confirmation prompt a real run asks for)
+pang internet
+
+# Same as above, explicitly
 pang internet --dry-run
 
-# Use the default playbook path (playbooks/internet.yml)
-pang internet
+# Actually apply it -- prompts for a typed "yes" unless shared.yml sets
+# auto_apply: true
+pang internet --dry-run=false
 
 # Point at a different playbook
 pang internet --playbook playbooks/other_internet.yml
 
-# Pass credentials as flags instead of env vars
+# Override mode/push for this run without editing the playbook file
+pang internet --dry-run=false --mode=uninstall --push
+
+# Pass credentials as flags instead of env vars/shared.yml
 pang internet \
   --client-id 'service1@12345.iam.panserviceaccount.com' \
   --client-secret 'xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx' \
   --tsg-id '12345'
 
 # Run the playbook but skip the automatic push, even if it sets push: true
-pang internet --no-push
+pang internet --dry-run=false --no-push
 
 # See all available flags
 pang internet -h
